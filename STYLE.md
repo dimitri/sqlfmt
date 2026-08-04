@@ -281,14 +281,35 @@ fixture's current content.
     when a single unbreakable token (long string literal, dense expression)
     forces it.
 
-18. **Comments**: rare (~5% of files). Header comments: 1–3 lines at the top,
-    `-- ` prefix, sentence case, wrapped near the line-length target.
-    Trailing inline comments: padded so multiple comments in the same block
-    share a common start column:
+18. **Comments**: rare (~5% of files), always preserved, never discarded.
+    A "--" comment sitting on its own source line, not preceded by real
+    code on that line, is a leading comment — attached to whatever
+    statement, clause, or list item follows it, reindented to that
+    context's column, and reflowed to the ~78–80 col line-length target
+    (rule 17). A blank source line between two leading comments is kept as
+    a paragraph break; a comment line that's nothing but dashes (e.g.
+    `-----------`) is a divider and is preserved verbatim, never merged
+    into surrounding prose. A comment on the same source line as preceding
+    real code is a trailing comment; multiple trailing comments in the same
+    contiguous block of lines are padded so they all start at a shared
+    column:
     ```sql
       select geom, ord_stra from mainstem          -- 155 high-order channels
     ...
          and r.ord_stra < 6;                       -- 161 direct tributaries
+    ```
+    Block comments (`/* ... */`) are rewritten into the C style: an opening
+    line with only `/*`, each content line reflowed to the line-length
+    target and starting with a `*` aligned under `/*`'s own `*` (its second
+    character), and a closing line with only `*/` aligned the same way —
+    regardless of how the original was formatted, so re-running the
+    formatter on its own output is a no-op:
+    ```sql
+    /*
+     * Generate the target month's calendar then LEFT JOIN each day
+     * against the factbook dataset, so as to have every day in the
+     * result set, whether or not we have a book entry for the day.
+     */
     ```
     A formatter's tokenizer must be comment-aware from the start (preserve
     and reposition comments, don't discard them) — this is the main reason

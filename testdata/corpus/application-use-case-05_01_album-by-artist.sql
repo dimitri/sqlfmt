@@ -1,3 +1,5 @@
+-- name: list-albums-by-artist
+-- List the album titles and duration of a given artist
      select album.title as album,
             sum(milliseconds) * interval '1 ms' as duration
        from album

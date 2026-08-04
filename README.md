@@ -170,6 +170,7 @@ Makefile                   — build/test entry points
 format/                    — package format, the library (import "github.com/dimitri/sqlfmt/format")
   lexer.go                 — tokenizer
   layout.go                — river-alignment layout engine
+  comments.go              — comment attachment, reflow, and C-style block rewrap (rule 18)
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
 cmd/sqlfmt/main.go         — the CLI binary

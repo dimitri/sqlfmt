@@ -1,3 +1,6 @@
+-- The 10 nearest pubs to Holborn (03_01, extended to limit 10) rendered as a
+-- single <svg> document: OSM streets from osm_london.roads for context, the
+-- search point in red, the nearest pubs in blue with their names.
 with search as (
   select point(- 0.12, 51.516) as pt
 ),

@@ -17,16 +17,21 @@ func Format(r io.Reader) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("sqlfmt: %w", err)
 	}
+	toks, eofComments := attachComments(toks)
 
 	stmts := splitStatements(toks)
 	var out []string
 	for _, s := range stmts {
 		out = append(out, formatStatement(s))
 	}
+	if trailing := renderLeadingComments(eofComments, 0); len(trailing) > 0 {
+		out = append(out, strings.Join(trailing, "\n"))
+	}
 	if len(out) == 0 {
 		return "", nil
 	}
-	return strings.Join(out, "\n\n") + "\n", nil
+	result := strings.Join(out, "\n\n") + "\n"
+	return alignTrailingComments(result), nil
 }
 
 // splitStatements splits the token stream on top-level ";" tokens. Each
@@ -91,6 +96,15 @@ func formatStatement(toks []Token) string {
 		return ""
 	}
 
+	var leading []string
+	if len(toks[0].Comments) > 0 {
+		leading = renderLeadingComments(toks[0].Comments, 0)
+		toks[0].Comments = nil
+	}
+	if len(leading) > 0 {
+		return strings.Join(leading, "\n") + "\n" + formatStatement(toks)
+	}
+
 	// A leading psql meta-command (e.g. "\copy ... from ... with csv") is
 	// only ever a prefix line, never the whole statement -- whatever
 	// tokens follow it are a real SQL statement in their own right and
@@ -125,6 +139,11 @@ func formatStatement(toks []Token) string {
 	out := strings.Join(lines, "\n")
 	if hasSemi {
 		out += ";"
+		if tc := toks[len(toks)-1].TrailingComment; tc != nil {
+			out += commentMarker + trailingCommentText(tc)
+		}
+	} else if tc := toks[len(toks)-1].TrailingComment; tc != nil {
+		out += commentMarker + trailingCommentText(tc)
 	}
 	return out
 }

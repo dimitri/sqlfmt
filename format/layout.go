@@ -31,6 +31,13 @@ var clauseWords = []struct {
 type clauseSeg struct {
 	name string
 	body []Token
+	// kwTok is the clause keyword's own first token (e.g. "from", "group"
+	// for "group by"). Kept around solely so a comment attached to it --
+	// which happens whenever a leading comment sits on its own line(s)
+	// directly before the keyword, rather than before the first token of
+	// its body -- isn't silently unreachable; body alone doesn't cover
+	// that position.
+	kwTok Token
 }
 
 // isNonLayout reports whether a token carries no layout weight of its own
@@ -156,7 +163,7 @@ func splitClauses(toks []Token) []clauseSeg {
 		if bi+1 < len(bounds) {
 			end = bounds[bi+1].idx
 		}
-		segs = append(segs, clauseSeg{name: b.name, body: toks[b.kwEnd:end]})
+		segs = append(segs, clauseSeg{name: b.name, body: toks[b.kwEnd:end], kwTok: toks[b.idx]})
 	}
 	return segs
 }
@@ -234,7 +241,9 @@ func maxJoinPhraseLen(fromBody []Token) int {
 		if len(seg) == 0 {
 			continue
 		}
-		if n := len(flatJoin(seg[:joinKeywordEnd(seg)])); n > max {
+		// plainJoin: measurement only, see fitsInline's comment on why not
+		// flatJoin.
+		if n := len(plainJoin(seg[:joinKeywordEnd(seg)])); n > max {
 			max = n
 		}
 	}
@@ -344,6 +353,31 @@ func renderRun(toks []Token, col int) []string {
 			continue
 		}
 
+		// Safety net: a token whose leading comment wasn't already
+		// consumed by an outer per-item wrapper (layoutCommaList,
+		// layoutPredicateList, ...) -- because it's buried inside a
+		// sub-expression those don't look inside, e.g. a function-call
+		// argument -- still needs somewhere safe to go, rather than being
+		// silently dropped (the previous behavior) or glued onto whatever
+		// text precedes it on the current line. Not attempting precise
+		// fidelity here (this path is rare); just guaranteed-safe: each
+		// leading comment on its own line, at whatever column the current
+		// line is already at.
+		if len(toks[i].Comments) > 0 {
+			indent := curCol
+			lead := renderLeadingComments(toks[i].Comments, indent)
+			toks[i].Comments = nil
+			if strings.TrimSpace(lines[len(lines)-1]) == "" {
+				lines[len(lines)-1] = lead[0]
+				lead = lead[1:]
+			}
+			lines = append(lines, lead...)
+			lines = append(lines, strings.Repeat(" ", indent))
+			curCol = indent
+			prev = nil
+		}
+		t = toks[i]
+
 		if t.Kind == TokKeyword && t.Lower == "case" {
 			end := matchCaseEnd(toks, i)
 			if prev != nil && spaceBetween(*prev, t) {
@@ -432,6 +466,17 @@ func renderRun(toks []Token, col int) []string {
 			write(" ")
 		}
 		write(renderTokenText(t))
+		// Safety net, mirroring the leading-comment one above: a trailing
+		// comment not already consumed by an outer per-item wrapper still
+		// forces a line break here (a "--" comment silently absorbing
+		// whatever token would otherwise follow it on the same line is
+		// exactly the corruption bug this whole mechanism exists to avoid).
+		if toks[i].TrailingComment != nil {
+			write(commentMarker + trailingCommentText(toks[i].TrailingComment))
+			toks[i].TrailingComment = nil
+			lines = append(lines, "")
+			curCol = 0
+		}
 		prev = &toks[i]
 		i++
 	}
@@ -598,13 +643,25 @@ func layoutOver(toks []Token, overCol int) []string {
 // previous line.
 func layoutCommaList(toks []Token, startCol int) []string {
 	items := splitTopLevelComma(trimTokens(toks))
-	flat := flatJoin(trimTokens(toks))
-	if startCol+len(flat) <= targetWidth && len(items) > 0 {
-		return []string{flat}
+	// Comment check first, and short-circuits before flatJoin ever runs:
+	// flatJoin's underlying renderRun call consumes/clears any comment
+	// metadata on these tokens as a side effect, which the multi-line path
+	// below still needs intact if this fast path doesn't end up taking it.
+	if len(items) > 0 && !anyItemComments(items) {
+		if flat := flatJoin(trimTokens(toks)); startCol+len(flat) <= targetWidth {
+			return []string{flat}
+		}
 	}
 	var lines []string
 	for idx, it := range items {
 		it = trimTokens(it)
+		// Cleared before renderRun runs, not after: renderRun has its own
+		// safety-net handling for a token whose comment metadata is still
+		// set (for tokens no per-item wrapper reaches), and calling it
+		// after would make that safety net fire redundantly on the very
+		// comment this loop is about to render properly itself.
+		lead := leadingCommentLines(it, startCol)
+		trailing := trailingCommentSuffix(it)
 		itLines := renderRun(it, startCol)
 		if idx < len(items)-1 {
 			// The separating comma belongs on the item's own last rendered
@@ -613,14 +670,81 @@ func layoutCommaList(toks []Token, startCol int) []string {
 			// lines by this point.
 			itLines[len(itLines)-1] += ","
 		}
+		itLines[len(itLines)-1] += trailing
 		if idx == 0 {
+			lines = append(lines, lead...)
 			lines = append(lines, itLines[0])
 		} else {
+			lines = append(lines, lead...)
 			lines = append(lines, strings.Repeat(" ", startCol)+itLines[0])
 		}
 		lines = append(lines, itLines[1:]...)
 	}
 	return lines
+}
+
+// anyTokenComments reports whether any token in toks carries a leading or
+// trailing comment -- used to force a multi-line layout even when a
+// flattened single-line render would otherwise fit, since that fast path
+// has nowhere to put a comment.
+func anyTokenComments(toks []Token) bool {
+	for _, t := range toks {
+		if len(t.Comments) > 0 || t.TrailingComment != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// anyItemComments reports whether any item in a comma/predicate/join list
+// carries a leading or trailing comment -- used to force the multi-line
+// layout even when the flattened form would otherwise fit inline, since the
+// single-line fast path has nowhere to put a comment.
+func anyItemComments(items [][]Token) bool {
+	for _, it := range items {
+		it = trimTokens(it)
+		if len(it) == 0 {
+			continue
+		}
+		if len(it[0].Comments) > 0 || it[len(it)-1].TrailingComment != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// leadingCommentLines renders any leading comments on item's first token as
+// complete lines at indent -- for the caller to splice in before its own
+// prefix+first-content-line composition.
+func leadingCommentLines(item []Token, indent int) []string {
+	item = trimTokens(item)
+	if len(item) == 0 || len(item[0].Comments) == 0 {
+		return nil
+	}
+	lines := renderLeadingComments(item[0].Comments, indent)
+	// Cleared once rendered here, so renderRun's own safety-net handling
+	// (for comments on tokens no per-item wrapper reaches, e.g. deep inside
+	// a function call) never double-renders what this call already emitted.
+	item[0].Comments = nil
+	return lines
+}
+
+// trailingCommentSuffix returns commentMarker+text for item's last token's
+// trailing comment, if any, else "" -- appended to whatever line ends up
+// holding that token; alignTrailingComments pads it later. Clears the field
+// once read, for the same reason leadingCommentLines does.
+func trailingCommentSuffix(item []Token) string {
+	item = trimTokens(item)
+	if len(item) == 0 {
+		return ""
+	}
+	last := &item[len(item)-1]
+	if last.TrailingComment == nil {
+		return ""
+	}
+	text := commentMarker + trailingCommentText(last.TrailingComment)
+	last.TrailingComment = nil
+	return text
 }
 
 func leadingSpaces(s string) int {
@@ -652,11 +776,17 @@ func layoutPredicateList(toks []Token, endCol int) []string {
 	startCol := endCol + 1
 	for idx, p := range preds {
 		p = trimTokens(p)
+		// Cleared before renderRun runs -- see layoutCommaList's identical
+		// ordering concern.
+		lead := leadingCommentLines(p, startCol)
+		trailing := trailingCommentSuffix(p)
+		pLines := renderRun(p, startCol)
+		pLines[len(pLines)-1] += trailing
 		// idx 0's line is appended directly after the clause keyword by the
-		// caller (renderClause), so it carries no prefix of its own here;
-		// only continuation lines get a right-aligned AND/OR prefix.
+		// caller (renderClause, which also strips its leading comment), so
+		// it carries no prefix of its own here; only continuation lines get
+		// a right-aligned AND/OR prefix and their own leading comments.
 		if idx == 0 {
-			pLines := renderRun(p, startCol)
 			lines = append(lines, pLines...)
 			continue
 		}
@@ -665,7 +795,7 @@ func layoutPredicateList(toks []Token, endCol int) []string {
 		if pad < 0 {
 			pad = 0
 		}
-		pLines := renderRun(p, startCol)
+		lines = append(lines, lead...)
 		prefix := strings.Repeat(" ", pad) + kw + " "
 		lines = append(lines, prefix+pLines[0])
 		lines = append(lines, pLines[1:]...)
@@ -705,11 +835,11 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 		ctes, rest := parseCTEs(toks)
 		var lines []string
 		for idx, c := range ctes {
-			cteLines := renderCTE(c, baseIndent, idx < len(ctes)-1)
+			prefix := ""
 			if idx == 0 {
-				cteLines[0] = strings.Repeat(" ", baseIndent) + "with " + strings.TrimSpace(cteLines[0])
+				prefix = "with "
 			}
-			lines = append(lines, cteLines...)
+			lines = append(lines, renderCTE(c, baseIndent, idx < len(ctes)-1, prefix)...)
 		}
 		lines = append(lines, formatQuerySegment(rest, baseIndent)...)
 		return lines
@@ -721,7 +851,7 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 	}
 	width := riverWidth(segs)
 
-	if fitsInline(segs, baseIndent, width) {
+	if fitsInline(segs, baseIndent, width) && !anyTokenComments(toks) {
 		return []string{flatJoin(toks)}
 	}
 
@@ -747,7 +877,12 @@ func fitsInline(segs []clauseSeg, baseIndent, width int) bool {
 				return false
 			}
 		}
-		total += len(s.name) + 1 + len(flatJoin(trimTokens(s.body))) + 1
+		// plainJoin, not flatJoin: this is a width estimate whose returned
+		// string is discarded, and flatJoin's underlying renderRun call has
+		// a side effect (consuming/clearing any comment metadata on these
+		// tokens) that a later, real render pass over the same tokens
+		// still needs intact.
+		total += len(s.name) + 1 + len(plainJoin(trimTokens(s.body))) + 1
 	}
 	return baseIndent+total <= targetWidth
 }
@@ -758,6 +893,25 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 	kwText := strings.Repeat(" ", pad) + s.name
 	bodyCol := baseIndent + width + 1
 	body := trimTokens(s.body)
+
+	// A leading comment on the clause keyword's own token (e.g. it sits on
+	// its own line directly before "from") or on the clause body's very
+	// first token would otherwise get glued onto the "select "/"from "/etc.
+	// keyword line by the concatenation below (bodyLines[0] is assumed to
+	// be real content). Strip and render it separately, at the same column
+	// the body's own content will start at, before that concatenation
+	// happens. Both positions matter: the keyword-token case is what a
+	// second formatting pass over this package's own output produces,
+	// since by then the comment already sits on its own line right before
+	// the keyword rather than before the first body token.
+	var lead []string
+	switch {
+	case len(s.kwTok.Comments) > 0:
+		lead = renderLeadingComments(s.kwTok.Comments, bodyCol)
+	case len(body) > 0 && len(body[0].Comments) > 0:
+		lead = renderLeadingComments(body[0].Comments, bodyCol)
+		body[0].Comments = nil
+	}
 
 	var bodyLines []string
 	switch s.name {
@@ -774,7 +928,7 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 	}
 
 	first := strings.Repeat(" ", kwCol) + kwText + " " + bodyLines[0]
-	out := []string{first}
+	out := append(lead, first)
 	out = append(out, bodyLines[1:]...)
 	return out
 }
@@ -794,7 +948,11 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 
 	joinCol := baseIndent + width + 1
 	phraseEndCol := joinCol - 1
+	// Cleared before renderRun runs -- see layoutCommaList's identical
+	// ordering concern.
+	firstTrailing := trailingCommentSuffix(segs[0])
 	firstLines := renderRun(trimTokens(segs[0]), joinCol)
+	firstLines[len(firstLines)-1] += firstTrailing
 	out := firstLines
 
 	for _, seg := range segs[1:] {
@@ -802,6 +960,8 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		if len(seg) == 0 {
 			continue
 		}
+		out = append(out, leadingCommentLines(seg, joinCol)...)
+		segTrailing := trailingCommentSuffix(seg)
 		kEnd := joinKeywordEnd(seg)
 		phrase := flatJoin(seg[:kEnd])
 		rest := seg[kEnd:]
@@ -824,7 +984,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			phrasePad = 0
 		}
 		if onIdx == -1 {
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(rest)
+			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(rest) + segTrailing
 			out = append(out, line)
 			continue
 		}
@@ -833,7 +993,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		preds, ops := splitAndOr(condPart)
 		if len(preds) == 1 {
 			// Single-condition ON stays inline after the join keyword phrase.
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart) + " on " + flatJoin(preds[0])
+			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart) + " on " + flatJoin(preds[0]) + segTrailing
 			out = append(out, line)
 			continue
 		}
@@ -851,6 +1011,9 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 				pad = 0
 			}
 			pLines := renderRun(trimTokens(p), phraseEndCol+1)
+			if idx == len(preds)-1 {
+				pLines[len(pLines)-1] += segTrailing
+			}
 			out = append(out, strings.Repeat(" ", pad)+kw+" "+pLines[0])
 			out = append(out, pLines[1:]...)
 		}
@@ -897,8 +1060,14 @@ func parseCTEs(toks []Token) ([][]Token, []Token) {
 	return ctes, toks[i:]
 }
 
-func renderCTE(cte []Token, baseIndent int, more bool) []string {
-	name := renderTokenText(cte[0])
+// renderCTE renders one "name [(cols)] as ( body )" CTE entry. withPrefix,
+// when non-empty ("with "), is prepended to the CTE's own "name as (" line
+// -- never to a leading comment line that might precede it -- since only
+// the first CTE in a WITH prologue carries it.
+func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []string {
+	lead := renderLeadingComments(cte[0].Comments, baseIndent)
+	cte[0].Comments = nil
+	name := withPrefix + renderTokenText(cte[0])
 	i := 1
 	// optional output-column list: name(col, ...) as (...)
 	if i < len(cte) && cte[i].Text == "(" {
@@ -916,13 +1085,13 @@ func renderCTE(cte []Token, baseIndent int, more bool) []string {
 		open = i
 	}
 	if open == -1 {
-		return []string{strings.Repeat(" ", baseIndent) + name}
+		return append(lead, strings.Repeat(" ", baseIndent)+name)
 	}
 	close := matchParen(cte, open)
 	inner := cte[open+1 : close]
 	bodyIndent := baseIndent + 2
 	bodyLines := formatQuerySegment(inner, bodyIndent)
-	var lines []string
+	lines := lead
 	lines = append(lines, strings.Repeat(" ", baseIndent)+name+" as (")
 	for _, l := range bodyLines {
 		lines = append(lines, strings.Repeat(" ", bodyIndent)+l)
@@ -931,6 +1100,7 @@ func renderCTE(cte []Token, baseIndent int, more bool) []string {
 	if more {
 		closing += ","
 	}
+	closing += trailingCommentSuffix(cte)
 	lines = append(lines, closing)
 	return lines
 }
