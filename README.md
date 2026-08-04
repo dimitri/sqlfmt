@@ -48,6 +48,49 @@ queries in-process without shelling out to the binary. The library lives in
 its own `format/` subpackage (rather than at the module root) specifically
 so it stays easily importable on its own, independent of the CLI.
 
+## Editor integration
+
+### Emacs
+
+`editors/emacs/sqlfmt.el` provides `sqlfmt-mode`, a minor mode for
+`sql-mode` buffers:
+
+```elisp
+(add-to-list 'load-path "~/dev/PostgreSQL/sqlfmt/editors/emacs")
+(add-hook 'sql-mode-hook #'sqlfmt-mode)
+```
+
+With it enabled, `C-M-h` (`mark-defun`, as in `python-mode`) selects the SQL
+statement at point, and `TAB` on that selection reformats it via `sqlfmt` —
+`indent-for-tab-command` already calls `indent-region` whenever the region
+is active, and `sqlfmt-mode` sets `indent-region-function` to use `sqlfmt`,
+so this needs no new keybinding for `TAB` itself. `sqlfmt-buffer` and
+`sqlfmt-region` are also plain interactive commands, and
+`sqlfmt-before-save-hook` can be added to `before-save-hook` to format on
+save. See the commentary at the top of `sqlfmt.el` for details.
+
+### Vim
+
+`editors/vim/ftplugin/sql.vim` wires `sqlfmt` into Vim's `formatprg`/
+`equalprg` options — since `sqlfmt` with no arguments already reads stdin
+and writes formatted SQL to stdout, no plugin logic beyond setting those two
+options is needed. Add the directory to your `runtimepath`:
+
+```vim
+set runtimepath+=~/dev/PostgreSQL/sqlfmt/editors/vim
+```
+
+or copy/symlink `sql.vim` to `~/.vim/ftplugin/sql.vim`. This enables:
+
+```
+gqip / gqap / gqG    " reformat a paragraph/block/the whole buffer (gq)
+=ap / =G / gg=G       " same, via the = operator
+:%!sqlfmt              " reformat the whole buffer directly
+```
+
+Set `g:sqlfmt_command` before the file loads to point at a non-`$PATH`
+binary.
+
 ## Repository layout
 
 ```
@@ -60,6 +103,8 @@ format/                    — package format, the library (import "github.com/d
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
 cmd/sqlfmt/main.go         — the CLI binary
+editors/emacs/sqlfmt.el     — sql-mode minor mode (mark-defun/indent-region integration)
+editors/vim/ftplugin/sql.vim — formatprg/equalprg integration
 testdata/corpus/           — flat directory of real book queries, each one run through
                              sqlfmt and reviewed — the round-trip/regression fixtures,
                              also used by `make test`'s CLI-level check
