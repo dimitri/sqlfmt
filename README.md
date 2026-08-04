@@ -1,5 +1,10 @@
 # sqlfmt
 
+**Want to try it without installing anything?** The
+[PostgreSQL SQL Formatter](https://theartofpostgresql.com/postgresql-sql-formatter/)
+runs `sqlfmt` directly in your browser (via WebAssembly, see below) — free to
+use, no install required.
+
 A `gofmt`-style command-line formatter for PostgreSQL SQL, implementing the
 specific hand-formatting convention used throughout Dimitri Fontaine's
 [*The Art of PostgreSQL*](https://theartofpostgresql.com) — a "river"-aligned style where clause keywords
