@@ -177,10 +177,22 @@ hand-formatting variance the tool normalizes away.
 - Whether to add the `pg_query_go` `Fingerprint` safety-net test once the
   core engine is stable (see architecture decision above) — not a blocker
   for a first working version.
-- The JS implementation (for the website's SQL Formatter tool) is a
-  deliberately separate, independent implementation — simpler, not a full
-  parser, lower correctness bar than this Go engine. It is *not* planned to
-  share code with this repo (see architecture decision above re: why a
-  shared engine wasn't chosen — same reasoning applies to JS/Go as applied
-  to the earlier Elisp-wrapper option that was considered and dropped for
-  this project). Out of scope for this repo; happens separately.
+- The website's SQL Formatter tool was originally planned as a deliberately
+  separate, independent JS implementation — simpler, not a full parser,
+  lower correctness bar than this Go engine, with no code sharing (see the
+  architecture decision above re: why a shared engine wasn't chosen for the
+  *core formatting logic* — that reasoning is about AST-vs-token-stream
+  design, not about language/runtime). That's since been revisited one
+  layer up: `wasm/` compiles this exact engine to WebAssembly
+  (`GOOS=js GOARCH=wasm`, `make wasm`), published as an evergreen dev
+  release by CI on every green push to `main` (mirroring how pgloader
+  publishes its v4 JAR — see `.github/workflows/ci.yml`'s
+  `publish-wasm-dev` job), at a stable URL:
+  `https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/sqlfmt.wasm`.
+  Whether `taop.xyz` actually adopts this (vs. keeping a hand-rolled JS
+  formatter) is still an open call — the wasm module is exact/correct but
+  ~3MB uncompressed and pulls in the Go runtime, whereas a lighter JS
+  reimplementation stays simpler for a paste-and-preview widget at the cost
+  of drifting from `STYLE.md` fidelity over time. Either way, the option to
+  use the real engine in-browser now exists without touching this repo's
+  CLI/library split.

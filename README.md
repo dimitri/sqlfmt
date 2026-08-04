@@ -91,6 +91,33 @@ gqip / gqap / gqG    " reformat a paragraph/block/the whole buffer (gq)
 Set `g:sqlfmt_command` before the file loads to point at a non-`$PATH`
 binary.
 
+## WebAssembly build
+
+`wasm/` compiles the `format` library to WebAssembly for in-browser use,
+exposing a single global JS function:
+
+```js
+sqlfmt.format(sql)
+//  -> { output: string } on success
+//  -> { error: string }  on a real parse/format error
+```
+
+Build it locally with `make wasm` (outputs `dist/wasm/sqlfmt.wasm` and the Go
+runtime's `wasm_exec.js` glue it needs), or `make wasm-test` to additionally
+run `wasm/smoketest.mjs`, which loads the module under Node and exercises
+`sqlfmt.format` the same way a browser page would.
+
+CI publishes this module on every green push to `main`, at a stable,
+always-latest-HEAD URL — the same pattern used for
+[pgloader's v4 JAR releases](https://github.com/dimitri/pgloader/releases/tag/v4-dev):
+
+```
+https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/sqlfmt.wasm
+https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/wasm_exec.js
+```
+
+See `.github/workflows/ci.yml`'s `wasm` and `publish-wasm-dev` jobs.
+
 ## Repository layout
 
 ```
@@ -103,6 +130,8 @@ format/                    — package format, the library (import "github.com/d
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
 cmd/sqlfmt/main.go         — the CLI binary
+wasm/main.go                — WebAssembly build (globalThis.sqlfmt.format), see "WebAssembly build"
+wasm/smoketest.mjs          — Node smoke test for the built wasm module
 editors/emacs/sqlfmt.el     — sql-mode minor mode (mark-defun/indent-region integration)
 editors/vim/ftplugin/sql.vim — formatprg/equalprg integration
 testdata/corpus/           — flat directory of real book queries, each one run through
