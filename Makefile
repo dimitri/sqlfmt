@@ -3,9 +3,21 @@ WASM_DIR := dist/wasm
 GO       := go
 TINYGO   := tinygo
 WASM_OPT := wasm-opt
+INSTALL  := install
 CORPUS   := $(shell find testdata/corpus -name '*.sql')
 
-.PHONY: all build test wasm wasm-test clean
+# PREFIX/DESTDIR follow the GNU Coding Standards / Debian Policy convention
+# (https://www.gnu.org/prep/standards/html_node/DESTDIR.html): PREFIX picks
+# the install tree (packagers override to /usr; left at /usr/local for a
+# plain `make install`), DESTDIR stages that tree under a build root without
+# baking the root into the installed binary's own path. A `debian/rules`
+# using debhelper's default `dh_auto_install` already invokes exactly
+# `make install DESTDIR=debian/<pkg>` for a plain Makefile like this one, so
+# no other packaging glue is needed for that half of it.
+PREFIX  ?= /usr/local
+BINDIR  := $(DESTDIR)$(PREFIX)/bin
+
+.PHONY: all build test wasm wasm-test install uninstall clean
 
 all: build
 
@@ -21,6 +33,13 @@ test: build
 		echo "$$dirty"; \
 		exit 1; \
 	fi
+
+install: build
+	$(INSTALL) -d $(BINDIR)
+	$(INSTALL) -m 0755 $(BINARY) $(BINDIR)/sqlfmt
+
+uninstall:
+	rm -f $(BINDIR)/sqlfmt
 
 # Builds the browser WebAssembly module (globalThis.sqlfmt.format(sql)) plus
 # the wasm_exec.js glue it needs, into $(WASM_DIR), along with pre-compressed

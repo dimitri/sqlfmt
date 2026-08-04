@@ -48,6 +48,28 @@ queries in-process without shelling out to the binary. The library lives in
 its own `format/` subpackage (rather than at the module root) specifically
 so it stays easily importable on its own, independent of the CLI.
 
+## Building and installing
+
+```console
+$ make build          # -> bin/sqlfmt
+$ make test           # go test ./... plus a CLI-level corpus check
+$ sudo make install   # -> /usr/local/bin/sqlfmt
+$ sudo make uninstall
+```
+
+`install`/`uninstall` follow the [GNU Coding Standards `PREFIX`/`DESTDIR`
+convention](https://www.gnu.org/prep/standards/html_node/DESTDIR.html) also
+required by Debian policy: `PREFIX` (default `/usr/local`) picks the install
+tree, `DESTDIR` stages that tree under a build root without baking the root
+into the installed binary's own path — e.g. a `debian/rules` using
+debhelper's default `dh_auto_install` already runs exactly
+`make install DESTDIR=debian/<pkg>` for a plain Makefile like this one, no
+extra packaging glue needed:
+
+```console
+$ make install DESTDIR=debian/sqlfmt PREFIX=/usr   # -> debian/sqlfmt/usr/bin/sqlfmt
+```
+
 ## Editor integration
 
 ### Emacs
