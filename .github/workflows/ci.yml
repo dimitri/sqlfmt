@@ -133,8 +133,17 @@ jobs:
             https://github.com/${{ github.repository }}/releases/download/wasm-dev/wasm_exec.js
             ```
 
+            A pre-compressed copy is also published for callers who want a
+            smaller transfer (GitHub Releases doesn't serve
+            `Content-Encoding`, so this isn't automatic -- see the
+            "WebAssembly build" section of README.md for how to consume it):
+            ```
+            https://github.com/${{ github.repository }}/releases/download/wasm-dev/sqlfmt.wasm.gz
+            ```
+
             This build: `sqlfmt-${{ steps.ver.outputs.sha }}.wasm`
           files: |
             dist/wasm/sqlfmt.wasm
+            dist/wasm/sqlfmt.wasm.gz
             dist/wasm/wasm_exec.js
             dist/wasm/sqlfmt-${{ steps.ver.outputs.sha }}.wasm

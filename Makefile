@@ -23,20 +23,25 @@ test: build
 	fi
 
 # Builds the browser WebAssembly module (globalThis.sqlfmt.format(sql)) plus
-# the wasm_exec.js glue it needs, into $(WASM_DIR). See wasm/main.go.
+# the wasm_exec.js glue it needs, into $(WASM_DIR), along with pre-compressed
+# a pre-compressed sqlfmt.wasm.gz copy (wasm/compress.mjs) for callers who
+# want the smaller transfer and are willing to decompress client-side --
+# GitHub Releases doesn't serve Content-Encoding, so this isn't transparent
+# to a plain fetch(). See the "WebAssembly build" section of README.md.
 #
 # Built with TinyGo (-no-debug -opt=z), then squeezed further with
 # Binaryen's wasm-opt, rather than the standard `go build` toolchain: the
 # same source compiles to ~330KB this way vs. ~2.9MB with stock Go (the
 # standard toolchain's wasm output always statically links the full
 # runtime/GC regardless of -ldflags, and cannot be told to drop it).
-# Requires `tinygo` and `wasm-opt` (Binaryen) on PATH -- see the
+# Requires `tinygo`, `wasm-opt` (Binaryen), and `node` on PATH -- see the
 # "WebAssembly build" section of README.md for install instructions.
 wasm:
 	mkdir -p $(WASM_DIR)
 	$(TINYGO) build -o $(WASM_DIR)/sqlfmt.wasm -target=wasm -no-debug -opt=z ./wasm
 	$(WASM_OPT) -Oz -o $(WASM_DIR)/sqlfmt.wasm $(WASM_DIR)/sqlfmt.wasm
 	cp "$$($(TINYGO) env TINYGOROOT)/targets/wasm_exec.js" $(WASM_DIR)/wasm_exec.js
+	node wasm/compress.mjs
 
 # Loads the built module under Node and exercises globalThis.sqlfmt.format,
 # the same entry point a browser page would call. See wasm/smoketest.mjs.
