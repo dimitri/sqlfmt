@@ -54,6 +54,61 @@ func TestLexMultiCharOperators(t *testing.T) {
 	}
 }
 
+// TestLexGiSTGINOperators covers the GiST/GIN/SP-GiST index operator
+// classes actually used in this repo's own corpus (hstore, intarray,
+// cube/earthdistance, trigram) plus a few core geometric/full-text ones --
+// regression coverage for the "<->" PostGIS/KNN-distance-style operator
+// bug report, generalized to the full operator table pulled from
+// pg_operator (see multiCharOperators' own comment).
+func TestLexGiSTGINOperators(t *testing.T) {
+	src := "a <-> b @@ c ~ d !~ e % f @> g <@ h ?| i ?& j -> k"
+	toks := lexOK(t, src)
+	want := []string{
+		"a", "<->", "b", "@@", "c", "~", "d", "!~", "e", "%", "f", "@>",
+		"g", "<@", "h", "?|", "i", "?&", "j", "->", "k",
+	}
+	if len(toks)-1 != len(want) {
+		t.Fatalf("token count = %d, want %d: %+v", len(toks)-1, len(want), toks)
+	}
+	for i, w := range want {
+		if toks[i].Text != w {
+			t.Fatalf("token %d = %q, want %q", i, toks[i].Text, w)
+		}
+	}
+}
+
+// TestLexOperatorPrefixConflicts specifically exercises operators where a
+// shorter registered operator is a textual prefix of a longer one (e.g.
+// "#>" of "#>>" of "#>#"), the exact failure mode multiCharOperators'
+// length-descending ordering exists to avoid: the longer one must lex as a
+// single token, not split into the short one plus leftover characters.
+func TestLexOperatorPrefixConflicts(t *testing.T) {
+	cases := []struct {
+		src  string
+		want string
+	}{
+		{"a #> b", "#>"},
+		{"a #>> b", "#>>"},
+		{"a #># b", "#>#"}, // "#>" is a prefix of both "#>>" and "#>#"
+		{"a << b", "<<"},
+		{"a <<= b", "<<="},
+		{"a <<| b", "<<|"},
+		{"a ~~ b", "~~"},
+		{"a ~~* b", "~~*"},
+		{"a !~~ b", "!~~"},
+		{"a !~~* b", "!~~*"},
+		{"a <-> b", "<->"},
+		{"a <->> b", "<->>"},
+		{"a <->>> b", "<->>>"},
+	}
+	for _, c := range cases {
+		toks := lexOK(t, c.src)
+		if toks[1].Text != c.want {
+			t.Errorf("lex(%q): token 1 = %q, want %q (full: %+v)", c.src, toks[1].Text, c.want, toks[:len(toks)-1])
+		}
+	}
+}
+
 func TestLexBackslashCommand(t *testing.T) {
 	toks := lexOK(t, "\\set season 'date ''1978-01-01'''\nselect 1;")
 	if toks[0].Kind != TokBackslashCmd {

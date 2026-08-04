@@ -17,6 +17,6 @@ with t(query) as (
                                   end as title
     from track_tags tt
     join tids on tt.tid = tids.rowid
-    join t on tt.tags @ @ t.query
+    join t on tt.tags @@ t.query
     join lastfm.track on tids.tid = track.tid
 order by artist;

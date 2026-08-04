@@ -104,6 +104,56 @@ func splitTopLevel(toks []Token, sep string) [][]Token {
 	return segs
 }
 
+// splitUnionSegments splits toks on every top-level UNION/UNION ALL/
+// INTERSECT/EXCEPT, returning each query segment and, between consecutive
+// segments, the operator text that joins them ("union", "union all",
+// "intersect", "except"). Each segment is independently formatted (its own
+// select/from/where/... clauses, its own river-alignment width) by the
+// caller, since combining two SELECTs' clause lists into one shared width
+// the way a single query's own clauses are would be meaningless -- they're
+// not the same query.
+func splitUnionSegments(toks []Token) (segs [][]Token, ops []string) {
+	depth := 0
+	start := 0
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if t.Text == "(" {
+			depth++
+			continue
+		}
+		if t.Text == ")" {
+			depth--
+			continue
+		}
+		if depth != 0 || t.Kind != TokKeyword {
+			continue
+		}
+		switch t.Lower {
+		case "union":
+			end := i + 1
+			op := "union"
+			if end < len(toks) && toks[end].Kind == TokKeyword && toks[end].Lower == "all" {
+				op = "union all"
+				end++
+			}
+			segs = append(segs, toks[start:i])
+			ops = append(ops, op)
+			start = end
+			i = end - 1
+		case "intersect":
+			segs = append(segs, toks[start:i])
+			ops = append(ops, "intersect")
+			start = i + 1
+		case "except":
+			segs = append(segs, toks[start:i])
+			ops = append(ops, "except")
+			start = i + 1
+		}
+	}
+	segs = append(segs, toks[start:])
+	return segs, ops
+}
+
 // splitTopLevelComma splits a top-level comma-separated list.
 func splitTopLevelComma(toks []Token) [][]Token {
 	var segs [][]Token
@@ -283,7 +333,16 @@ func renderTokenText(t Token) string {
 // spaceBetween decides whether a space belongs between two adjacent
 // rendered tokens (STYLE.md rules 4 and 5: no space around "." or "::", no
 // space before "," "(" ")" ";" "]", no space after "(" "[").
-func spaceBetween(prev, next Token) bool {
+// spaceBetween decides whether a space belongs between prev and next as
+// they're rendered in sequence. prevPrev -- the token before prev, or nil
+// at the start of a run -- exists solely to tell a unary "-"/"+" (no space
+// before its operand: "-0.12", not "- 0.12") apart from the binary
+// operator (a space on both sides: "a - b"): prev alone can't distinguish
+// them, since "-"/"+" render identically as tokens either way.
+func spaceBetween(prevPrev *Token, prev, next Token) bool {
+	if (prev.Text == "-" || prev.Text == "+") && isUnaryContext(prevPrev) {
+		return false
+	}
 	if prev.Text == "(" || prev.Text == "[" {
 		return false
 	}
@@ -308,6 +367,30 @@ func spaceBetween(prev, next Token) bool {
 			return false
 		}
 		return true
+	}
+	if next.Text == "[" {
+		// array subscript/slice ("arr[1]", "(pos)[0]"): never a space
+		// before "[" regardless of what precedes it.
+		return false
+	}
+	return true
+}
+
+// isUnaryContext reports whether a "-"/"+" immediately following prevPrev
+// (nil at the very start of a run) is acting as a unary sign rather than a
+// binary operator: true unless prevPrev is a token that just completed a
+// value (an identifier, literal, or closing ")"/"]"), in which case "-"/"+"
+// is subtracting/adding from it.
+func isUnaryContext(prevPrev *Token) bool {
+	if prevPrev == nil {
+		return true
+	}
+	switch prevPrev.Kind {
+	case TokIdent, TokNumber, TokString, TokDollarString, TokParam:
+		return false
+	}
+	if prevPrev.Text == ")" || prevPrev.Text == "]" {
+		return false
 	}
 	return true
 }
@@ -339,7 +422,7 @@ func renderRun(toks []Token, col int) []string {
 		}
 	}
 
-	var prev *Token
+	var prev, prevPrev *Token
 	i := 0
 	for i < len(toks) {
 		t := toks[i]
@@ -348,7 +431,7 @@ func renderRun(toks []Token, col int) []string {
 				write(" ")
 			}
 			write(t.Text)
-			prev = &toks[i]
+			prevPrev, prev = prev, &toks[i]
 			i++
 			continue
 		}
@@ -380,11 +463,11 @@ func renderRun(toks []Token, col int) []string {
 
 		if t.Kind == TokKeyword && t.Lower == "case" {
 			end := matchCaseEnd(toks, i)
-			if prev != nil && spaceBetween(*prev, t) {
+			if prev != nil && spaceBetween(prevPrev, *prev, t) {
 				write(" ")
 			}
 			merge(layoutCase(toks[i:end+1], curCol))
-			prev = &toks[end]
+			prevPrev, prev = prev, &toks[end]
 			i = end + 1
 			continue
 		}
@@ -392,7 +475,7 @@ func renderRun(toks []Token, col int) []string {
 		if t.Kind == TokKeyword && t.Lower == "over" && i+1 < len(toks) && toks[i+1].Text == "(" {
 			close := matchParen(toks, i+1)
 			overToks := toks[i : close+1]
-			if prev != nil && spaceBetween(*prev, t) {
+			if prev != nil && spaceBetween(prevPrev, *prev, t) {
 				write(" ")
 			}
 			flat := plainJoin(overToks)
@@ -401,7 +484,7 @@ func renderRun(toks []Token, col int) []string {
 			} else {
 				merge(layoutOver(overToks, curCol))
 			}
-			prev = &toks[close]
+			prevPrev, prev = prev, &toks[close]
 			i = close + 1
 			continue
 		}
@@ -409,7 +492,7 @@ func renderRun(toks []Token, col int) []string {
 		if t.Text == "(" {
 			close := matchParen(toks, i)
 			inner := toks[i+1 : close]
-			needSpace := prev != nil && spaceBetween(*prev, t)
+			needSpace := prev != nil && spaceBetween(prevPrev, *prev, t)
 			isSubquery := len(inner) > 0 && inner[0].Kind == TokKeyword && (inner[0].Lower == "select" || inner[0].Lower == "with")
 			if needSpace {
 				write(" ")
@@ -457,12 +540,12 @@ func renderRun(toks []Token, col int) []string {
 					write(")")
 				}
 			}
-			prev = &toks[close]
+			prevPrev, prev = prev, &toks[close]
 			i = close + 1
 			continue
 		}
 
-		if prev != nil && spaceBetween(*prev, t) {
+		if prev != nil && spaceBetween(prevPrev, *prev, t) {
 			write(" ")
 		}
 		write(renderTokenText(t))
@@ -477,7 +560,7 @@ func renderRun(toks []Token, col int) []string {
 			lines = append(lines, "")
 			curCol = 0
 		}
-		prev = &toks[i]
+		prevPrev, prev = prev, &toks[i]
 		i++
 	}
 	return lines
@@ -497,17 +580,17 @@ func flatJoin(toks []Token) string {
 // flatJoin, which would recreate the construct it's trying to measure.
 func plainJoin(toks []Token) string {
 	var sb strings.Builder
-	var prev *Token
+	var prev, prevPrev *Token
 	for i := range toks {
 		t := toks[i]
 		if isNonLayout(t) {
 			continue
 		}
-		if prev != nil && spaceBetween(*prev, t) {
+		if prev != nil && spaceBetween(prevPrev, *prev, t) {
 			sb.WriteByte(' ')
 		}
 		sb.WriteString(renderTokenText(t))
-		prev = &toks[i]
+		prevPrev, prev = prev, &toks[i]
 	}
 	return sb.String()
 }
@@ -832,16 +915,31 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 func formatQuerySegment(toks []Token, baseIndent int) []string {
 	toks = trimTokens(toks)
 	if len(toks) > 0 && toks[0].Kind == TokKeyword && toks[0].Lower == "with" {
+		withPrefix := "with "
+		if len(toks) > 1 && toks[1].Kind == TokKeyword && toks[1].Lower == "recursive" {
+			withPrefix = "with recursive "
+		}
 		ctes, rest := parseCTEs(toks)
 		var lines []string
 		for idx, c := range ctes {
 			prefix := ""
 			if idx == 0 {
-				prefix = "with "
+				prefix = withPrefix
 			}
 			lines = append(lines, renderCTE(c, baseIndent, idx < len(ctes)-1, prefix)...)
 		}
 		lines = append(lines, formatQuerySegment(rest, baseIndent)...)
+		return lines
+	}
+
+	if usegs, uops := splitUnionSegments(toks); len(usegs) > 1 {
+		var lines []string
+		for idx, seg := range usegs {
+			lines = append(lines, formatQuerySegment(seg, baseIndent)...)
+			if idx < len(uops) {
+				lines = append(lines, strings.Repeat(" ", baseIndent)+uops[idx])
+			}
+		}
 		return lines
 	}
 
