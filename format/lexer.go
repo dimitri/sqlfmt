@@ -78,9 +78,40 @@ func buildKeywordSet(words []string) map[string]bool {
 }
 
 // multiCharOperators lists operator lexemes longer than one character, tried
-// longest-first at each scan position.
+// longest-first at each scan position -- ordering strictly by length (not
+// just alphabetically) matters: e.g. "#>>" must be tried before "#>", or
+// the latter would match its first two characters and leave a stray ">"
+// behind.
+//
+// This set is every multi-character operator name registered in
+// PostgreSQL 17's pg_operator catalog (queried directly: `select distinct
+// oprname from pg_operator where length(oprname) > 1`), with pg_trgm,
+// hstore, intarray, cube, earthdistance, and ltree all CREATE EXTENSIONed
+// first -- covering not just core arithmetic/comparison/JSON/array/range
+// operators but the GiST/GIN/SP-GiST index operator classes actually used
+// in this repo's own corpus (which has hstore, intarray, cube/earthdistance,
+// and trigram example chapters): geometric &&/&</&>/<->/@-@/..., full-text
+// @@/@@@, trigram %/<->/<->>>(word-similarity)/<<<->(strict word-similarity),
+// hstore ?/?&/?|/->, ltree @>/<@/?, and the (deprecated but still
+// catalogued) path/polygon "before"/"after" */< family. "!=" and "::"
+// aren't in pg_operator (the parser normalizes "!=" to "<>", and "::" is
+// cast syntax, not a real operator) but are still real input syntax, so
+// are kept too.
 var multiCharOperators = []string{
-	"->>", "::", "->", "@>", "<@", "<=", ">=", "<>", "!=", "||",
+	// 5-character
+	"<->>>", "<<<->",
+	// 4-character
+	"!~~*", "#<=#", "#>=#", "<->>", "<<->", "~<=~", "~>=~",
+	// 3-character
+	"!~*", "!~~", "#<#", "#>#", "#>>", "%>>", "&<|", "*<=", "*<>", "*>=",
+	"->>", "-|-", "<#>", "<->", "<<%", "<<=", "<<|", "<=>", "<@>", ">>=",
+	"?-|", "?<@", "?@>", "?||", "@-@", "@@@", "^<@", "^@>", "|&>", "|>>",
+	"||/", "~<~", "~>~", "~~*",
+	// 2-character
+	"!!", "!=", "!~", "##", "#-", "#=", "#>", "%#", "%%", "%>", "&&", "&<",
+	"&>", "*<", "*=", "*>", "::", "->", "<%", "<<", "<=", "<>", "<@", "<^",
+	">=", ">>", ">^", "?#", "?&", "?-", "?@", "?|", "?~", "@>", "@?", "@@",
+	"^?", "^@", "^~", "|/", "||", "~*", "~=", "~>", "~~",
 }
 
 type lexer struct {

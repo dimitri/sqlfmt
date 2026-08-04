@@ -8,4 +8,4 @@ create table test
 
 insert into test(f1) values (default), (null), ('foo');
 
-ERROR : null value in column "f1" violates not - null constraint DETAIL : Failing row contains(2, null).
+ERROR : null value in column "f1" violates not -null constraint DETAIL : Failing row contains(2, null).
