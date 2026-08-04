@@ -1,15 +1,17 @@
 //go:build js && wasm
 
 // Command wasm compiles the sqlfmt formatter to WebAssembly for in-browser
-// use (GOOS=js GOARCH=wasm), exposing a single global JS function:
+// use, exposing a single global JS function:
 //
 //	globalThis.sqlfmt.format(sql)
 //	  -> { output: string } on success
 //	  -> { error: string }  on a real parse/format error
 //
-// Load it alongside the Go runtime's wasm_exec.js glue (copied into this
-// build's output directory by `make wasm`, from
-// $(go env GOROOT)/lib/wasm/wasm_exec.js), e.g.:
+// Built with TinyGo (-target=wasm), not the standard `go build` js/wasm
+// target, to keep the module small -- see the "WebAssembly build" section
+// of README.md. Load it alongside the matching wasm_exec.js glue (copied
+// into this build's output directory by `make wasm`, from TinyGo's own
+// target support files, not the standard Go toolchain's), e.g.:
 //
 //	<script src="wasm_exec.js"></script>
 //	<script>

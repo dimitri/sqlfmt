@@ -102,10 +102,22 @@ sqlfmt.format(sql)
 //  -> { error: string }  on a real parse/format error
 ```
 
-Build it locally with `make wasm` (outputs `dist/wasm/sqlfmt.wasm` and the Go
-runtime's `wasm_exec.js` glue it needs), or `make wasm-test` to additionally
-run `wasm/smoketest.mjs`, which loads the module under Node and exercises
-`sqlfmt.format` the same way a browser page would.
+Built with [TinyGo](https://tinygo.org) (`tinygo build -target=wasm -no-debug
+-opt=z`) plus a [Binaryen](https://github.com/WebAssembly/binaryen)
+`wasm-opt -Oz` pass, rather than the standard `go build` toolchain: the
+standard js/wasm target always statically links its full runtime and GC with
+no way to drop it, landing around **2.9MB** for this program; the same
+source via TinyGo + wasm-opt comes in around **330KB** — roughly 9x smaller,
+and confirmed to still round-trip correctly (see `wasm/smoketest.mjs`).
+Requires `tinygo` and `wasm-opt` on `PATH` (`brew install tinygo binaryen`
+on macOS; CI installs both via
+[`acifani/setup-tinygo`](https://github.com/acifani/setup-tinygo)).
+
+Build it locally with `make wasm` (outputs `dist/wasm/sqlfmt.wasm` and the
+matching `wasm_exec.js` glue it needs, from TinyGo's own target support
+files — not the standard Go toolchain's), or `make wasm-test` to
+additionally run `wasm/smoketest.mjs`, which loads the module under Node and
+exercises `sqlfmt.format` the same way a browser page would.
 
 CI publishes this module on every green push to `main`, at a stable,
 always-latest-HEAD URL — the same pattern used for

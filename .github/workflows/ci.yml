@@ -49,6 +49,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # TinyGo (not the standard `go build`) is what actually produces a
+      # small module here -- the stock toolchain always statically links
+      # its full runtime/GC into a js/wasm build (no -ldflags can drop it),
+      # landing around 2.9MB for this program; TinyGo with -opt=z plus a
+      # wasm-opt -Oz pass (installed alongside it below) gets the same
+      # source down to ~330KB. Version pinned to match local dev tooling.
+      - uses: acifani/setup-tinygo@v3
+        with:
+          tinygo-version: '0.41.1'
+
       - uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
