@@ -2,7 +2,7 @@
 
 A `gofmt`-style command-line formatter for PostgreSQL SQL, implementing the
 specific hand-formatting convention used throughout Dimitri Fontaine's
-*The Art of PostgreSQL* — a "river"-aligned style where clause keywords
+[*The Art of PostgreSQL*](https://theartofpostgresql.com) — a "river"-aligned style where clause keywords
 (`select`/`from`/`where`/`group by`/`having`/`order by`) are right-padded so
 they all end at the same column:
 
