@@ -50,7 +50,7 @@ either):
   formatting and literal values.
 
   **Best use here: a correctness oracle in the test suite, not the runtime
-  engine.** `Fingerprint(input) == Fingerprint(sqlfmt.Format(input))` is a
+  engine.** `Fingerprint(input) == Fingerprint(format.Format(input))` is a
   strong, cheap regression check — confirms formatting never silently
   changes what a query *means*, using the actual Postgres parser as ground
   truth. Requires cgo (build-time C compilation of parts of Postgres,
@@ -84,43 +84,56 @@ cheaply without requiring a rewrite of the formatting engine itself.
 
 ## Module layout
 
+The library lives in its own `format/` subpackage (`import
+"github.com/dimitri/sqlfmt/format"`) rather than at the module root, so it
+stays cleanly importable by other Go projects independent of the CLI —
+`cmd/sqlfmt` is just one consumer of it.
+
 ```
-sqlfmt.go        — package sqlfmt: Format(io.Reader) (string, error), the public API
-lexer.go         — tokenizer: strings ('...' with '' escaping), dollar-quoting
-                   ($$...$$ / $tag$...$tag$), identifiers (quoted "..." and bare),
-                   numbers, multi-char operators (::, ||, ->, ->>, @>, <@, etc.),
-                   comments (-- and /* */ block, with nesting awareness since
-                   Postgres block comments do nest), parens/brackets, commas,
-                   semicolons, keywords (case-insensitive against a keyword table)
-layout.go        — the layout engine:
-                     - split input into top-level statements on semicolons,
-                       respecting string/comment/paren/dollar-quote context
-                     - track paren depth; each new depth (subquery, CTE body)
-                       gets its own river-alignment computation (STYLE.md rule
-                       "unifying rule")
-                     - recognize clause keywords at the current statement's
-                       depth-0: select/from/where/group by/having/order by/
-                       insert into/update/set/delete/returning/with/values/
-                       union [all]/intersect/except
-                     - JOIN handling (STYLE.md rule 9)
-                     - CTE handling (rule 13)
-                     - window function OVER(...) wrapping (rule 14)
-                     - CASE/WHEN/THEN/ELSE/END (rule 15, per-instance realignment)
-                     - CREATE TABLE column-alignment sub-mode (rule 16, a
-                       genuinely different formatting mode from the query
-                       clauses — column-name-width alignment, not clause-keyword
-                       alignment)
-sqlfmt_test.go   — corpus round-trip test: format() every file under
-                   testdata/corpus/, diff against the file's own content.
-                   Files under testdata/excluded/ must NOT be included.
-                   An env var (e.g. SQLFMT_CORPUS_DIR) can optionally point at
-                   the full sibling corpus
-                   (/Users/dim/dev/TAOP/TheArtOfPostgreSQL/queries) for deeper
-                   local validation beyond the committed testdata/ subset —
-                   skip that check gracefully when the env var is unset so CI
-                   on other machines doesn't depend on a sibling checkout existing.
+format/
+  format.go        — package format: Format(io.Reader) (string, error), the public API
+  lexer.go         — tokenizer: strings ('...' with '' escaping), dollar-quoting
+                     ($$...$$ / $tag$...$tag$), identifiers (quoted "..." and bare),
+                     numbers, multi-char operators (::, ||, ->, ->>, @>, <@, etc.),
+                     comments (-- and /* */ block, with nesting awareness since
+                     Postgres block comments do nest), parens/brackets, commas,
+                     semicolons, keywords (case-insensitive against a keyword table)
+  layout.go        — the layout engine:
+                       - split input into top-level statements on semicolons,
+                         respecting string/comment/paren/dollar-quote context
+                       - track paren depth; each new depth (subquery, CTE body)
+                         gets its own river-alignment computation (STYLE.md rule
+                         "unifying rule")
+                       - recognize clause keywords at the current statement's
+                         depth-0: select/from/where/group by/having/order by/
+                         insert into/update/set/delete/returning/with/values/
+                         union [all]/intersect/except
+                       - JOIN handling (STYLE.md rule 9)
+                       - CTE handling (rule 13)
+                       - window function OVER(...) wrapping (rule 14)
+                       - CASE/WHEN/THEN/ELSE/END (rule 15, per-instance realignment)
+                       - CREATE TABLE column-alignment sub-mode (rule 16, a
+                         genuinely different formatting mode from the query
+                         clauses — column-name-width alignment, not clause-keyword
+                         alignment)
+  format_test.go   — corpus round-trip test: format() every file under
+                     ../testdata/corpus/, diff against the file's own content.
+                     Files under testdata/excluded/ must NOT be included.
+                     An env var (e.g. SQLFMT_CORPUS_DIR) can optionally point at
+                     the full sibling corpus
+                     (/Users/dim/dev/TAOP/TheArtOfPostgreSQL/queries) for deeper
+                     local validation beyond the committed testdata/ subset —
+                     skip that check gracefully when the env var is unset so CI
+                     on other machines doesn't depend on a sibling checkout existing.
 cmd/sqlfmt/
-  main.go        — CLI, gofmt-shaped flags (see below)
+  main.go          — CLI, gofmt-shaped flags (see below), imports format.Format
+testdata/
+  corpus/          — fixtures; also read directly by `make test`'s CLI-level
+                     `sqlfmt -l` check, which is why this sits at the repo
+                     root rather than under format/ despite only format's own
+                     tests using it via Go (Go ignores any "testdata" dir
+                     regardless of nesting, so this doesn't affect builds)
+  excluded/         — non-fixtures kept for documentation, see its own README.md
 ```
 
 ## CLI spec (`cmd/sqlfmt`)
@@ -141,22 +154,26 @@ Modeled directly on `gofmt`:
 
 ## Testing strategy
 
-The corpus is unusually good test data: `testdata/corpus/` is *already*
-correctly formatted (real book examples), so `Format(file) == file` should
-hold for nearly every file. Any divergence is either a real formatter bug or
-one of the documented ambiguous areas in `STYLE.md`'s summary table — worth
-distinguishing explicitly in test failure output (e.g. tag known-divergent
-files rather than silently skipping or silently failing on them).
-`testdata/corpus/04-sql-select/16-sql-103/04_01.sql` is a known, deliberate
-exception (see `STYLE.md`'s "unifying rule" section) — expect it not to
-round-trip and don't try to make it pass.
+`testdata/corpus/` holds `sqlfmt`'s own canonical output over real book
+queries: each fixture started as a hand-formatted example, was run through
+`sqlfmt`, and was reviewed before being committed as the fixture's content.
+`Format(file) == file` therefore holds for every corpus file by construction
+(enforced by `TestCorpusRoundTrip`), and the check is really an
+idempotency/regression guard — a future change that alters output for any
+covered construct trips a fixture immediately. `knownDivergent` in
+`sqlfmt_test.go` exists for the rare case where a fixture is deliberately
+*not* regenerated (e.g. to pin a specific known limitation for visibility);
+it's empty by default. This differs from validating independent,
+tool-untouched ground truth against `STYLE.md` — for that, point
+`SQLFMT_CORPUS_DIR` at the full sibling corpus and read `TestFullCorpusIfAvailable`'s
+mismatch log, which is informational rather than a hard failure since that
+corpus was never curated to be 100% round-trip-clean, and still reflects raw
+hand-formatting variance the tool normalizes away.
 
 ## Open questions for whoever picks this up
 
 - Go module path / GitHub org for publishing (placeholder used in README:
   `github.com/dimitri/sqlfmt`).
-- License (should probably match the book's own code license — check what
-  `TheArtOfPostgreSQL` itself uses).
 - Whether to add the `pg_query_go` `Fingerprint` safety-net test once the
   core engine is stable (see architecture decision above) — not a blocker
   for a first working version.

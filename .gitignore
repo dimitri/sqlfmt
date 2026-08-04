@@ -1,2 +1,7 @@
 /sqlfmt
+/bin/
 *.test
+
+# editor lock/autosave files
+.#*
+\#*\#

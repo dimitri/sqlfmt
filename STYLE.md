@@ -51,12 +51,17 @@ nested (inside a CTE or subquery), the whole staircase shifts right with it:
 (`group by` ends at column 9 here, matching `select`/`from` at that same
 nesting level.)
 
-**Known real exception**: `testdata/corpus/04-sql-select/16-sql-103/04_01.sql`
+**Known real exception**: the book source behind `testdata/corpus/sql-103-04_01.sql`
+(originally `04-sql-select/16-sql-103/04_01.sql` in the full sibling corpus)
 breaks this rule's own self-consistency — `select`/`from`/`group by`/`having`/
 `order by` all end at column 10 in that file, but `where`/`and` end at column
 8 in the *same statement*. This is genuine hand-formatting drift in the
 source, not a documented rule variant. Don't try to reproduce it; a formatter
-should apply the rule uniformly and simply diverge from this one file.
+should apply the rule uniformly and simply diverge from it. Note that the
+committed fixture itself no longer shows this drift — per `format/format_test.go`,
+corpus fixtures hold `sqlfmt`'s own canonical output, which normalizes it
+away; this note now documents the *original* hand-formatting, not the
+fixture's current content.
 
 ## Rule list
 
@@ -200,21 +205,24 @@ should apply the rule uniformly and simply diverge from this one file.
     Real, quantified exceptions — implement the defaults below, don't chase
     100% fidelity:
     - `as` alone on the WITH-name line with `(` starting the next line
-      happens in a real minority (~2 of ~15 sampled CTE files:
-      `04-sql-select/16-sql-103/01_02_f1db.decade.races.sql`,
-      `03-writing-sql-queries/05-business-logic/05_06.sql`, both in
-      `testdata/corpus/`). Pick the dominant same-line `as (` form as the
-      formatter's output; treat the split form as an acceptable input
-      variant, not an error.
-    - **CTE body indent is not fixed at 2 spaces** — a recursive CTE
-      (`testdata/corpus/04-sql-select/16-sql-103/05_07_hydrorivers.recursive.sql`)
-      indents its body 7 spaces to make room for a right-aligned
+      happened in a real minority of the original book source (~2 of ~15
+      sampled CTE files, corresponding to what are now
+      `testdata/corpus/sql-103-01_02_f1db.decade.races.sql` and
+      `business-logic-05_06.sql`). Pick the dominant same-line `as (` form
+      as the formatter's output; treat the split form as an acceptable
+      input variant, not an error.
+    - **CTE body indent is not fixed at 2 spaces** — a recursive CTE, the
+      book source behind `testdata/corpus/sql-103-05_07_hydrorivers.recursive.sql`,
+      indented its body 7 spaces to make room for a right-aligned
       `union all`. Real, deliberate, author-tuned. **Default to 2 spaces**
       (the clear majority) and accept the formatter won't replicate this
-      specific hand-tuned case.
+      specific hand-tuned case (the committed fixture itself now holds the
+      2-space canonical form, per the corpus's current semantics — see
+      `format/format_test.go`).
     - **Subsequent CTE names are usually flush-left at column 0** when
-      chained, but `testdata/corpus/08-extensions/51-hyperloglog/05_01_tweets.hll.sql`
-      indents its second CTE name 4 spaces. Default to flush-left.
+      chained, but the book source behind
+      `testdata/corpus/hyperloglog-05_01_tweets.hll.sql` indented
+      its second CTE name 4 spaces. Default to flush-left.
 
 14. **Window functions**: short `OVER (...)` stays inline. When
     `PARTITION BY`/`ORDER BY`/a frame clause don't fit, wrap them under the
