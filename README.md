@@ -91,6 +91,76 @@ gqip / gqap / gqG    " reformat a paragraph/block/the whole buffer (gq)
 Set `g:sqlfmt_command` before the file loads to point at a non-`$PATH`
 binary.
 
+## WebAssembly build
+
+`wasm/` compiles the `format` library to WebAssembly for in-browser use,
+exposing a single global JS function:
+
+```js
+sqlfmt.format(sql)
+//  -> { output: string } on success
+//  -> { error: string }  on a real parse/format error
+```
+
+Built with [TinyGo](https://tinygo.org) (`tinygo build -target=wasm -no-debug
+-opt=z`) plus a [Binaryen](https://github.com/WebAssembly/binaryen)
+`wasm-opt -Oz` pass, rather than the standard `go build` toolchain: the
+standard js/wasm target always statically links its full runtime and GC with
+no way to drop it, landing around **2.9MB** for this program; the same
+source via TinyGo + wasm-opt comes in around **330KB** — roughly 9x smaller,
+and confirmed to still round-trip correctly (see `wasm/smoketest.mjs`).
+Requires `tinygo` and `wasm-opt` on `PATH` (`brew install tinygo binaryen`
+on macOS; CI installs both via
+[`acifani/setup-tinygo`](https://github.com/acifani/setup-tinygo)).
+
+Build it locally with `make wasm` (outputs `dist/wasm/sqlfmt.wasm`, the
+matching `wasm_exec.js` glue it needs — from TinyGo's own target support
+files, not the standard Go toolchain's — plus a pre-compressed
+`sqlfmt.wasm.gz` copy, see below), or `make wasm-test` to additionally run
+`wasm/smoketest.mjs`, which loads the module under Node and exercises
+`sqlfmt.format` the same way a browser page would.
+
+CI publishes all of this on every green push to `main`, at stable,
+always-latest-HEAD URLs — the same pattern used for
+[pgloader's v4 JAR releases](https://github.com/dimitri/pgloader/releases/tag/v4-dev):
+
+```
+https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/sqlfmt.wasm
+https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/wasm_exec.js
+https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/sqlfmt.wasm.gz
+```
+
+See `.github/workflows/ci.yml`'s `wasm` and `publish-wasm-dev` jobs.
+
+### Pre-compressed copy (`.gz`)
+
+`sqlfmt.wasm` is ~330KB; gzipped it's ~130KB. GitHub Releases doesn't serve
+this with a `Content-Encoding` header (verified — a plain `fetch` gets the
+literal compressed bytes back, not auto-decompressed by the browser), but it
+can still be decompressed client-side with no extra dependency, via the
+standard [Compression Streams
+API](https://developer.mozilla.org/en-US/docs/Web/API/Compression_Streams_API)
+(confirmed working end-to-end in a real browser):
+
+```js
+const response = await fetch("sqlfmt.wasm.gz");
+const bytes = await new Response(
+  response.body.pipeThrough(new DecompressionStream("gzip")),
+).arrayBuffer();
+const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
+```
+
+(Brotli was tried too but dropped: pre-compressing to `.br` would only pay
+off if the file were served with a transparent `Content-Encoding: br` by
+whatever server ultimately hosts it, which is outside this repo's control —
+and unlike gzip, there's no `DecompressionStream("br")` to decompress it
+client-side; that throws `Unsupported compression format` even on a current
+Chrome. Not worth a second artifact for a path nothing here can use.)
+
+Plain **`sqlfmt.wasm`** remains the zero-effort default: works directly with
+`WebAssembly.instantiateStreaming(fetch(...))`, no decompression code at
+all, at the cost of the larger transfer.
+
 ## Repository layout
 
 ```
@@ -103,6 +173,9 @@ format/                    — package format, the library (import "github.com/d
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
 cmd/sqlfmt/main.go         — the CLI binary
+wasm/main.go                — WebAssembly build (globalThis.sqlfmt.format), see "WebAssembly build"
+wasm/smoketest.mjs          — Node smoke test for the built wasm module
+wasm/compress.mjs           — produces sqlfmt.wasm.gz from the built module
 editors/emacs/sqlfmt.el     — sql-mode minor mode (mark-defun/indent-region integration)
 editors/vim/ftplugin/sql.vim — formatprg/equalprg integration
 testdata/corpus/           — flat directory of real book queries, each one run through

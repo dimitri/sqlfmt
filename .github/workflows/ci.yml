@@ -35,3 +35,115 @@ jobs:
 
       - name: test
         run: make test
+
+  # ── Build + smoke-test the browser WebAssembly module ──────────────────────
+  # Runs on every push and PR so a wasm/ regression is caught before merge,
+  # not just when publish-wasm-dev (push-to-main only) would otherwise be the
+  # first thing to notice.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # TinyGo (not the standard `go build`) is what actually produces a
+      # small module here -- the stock toolchain always statically links
+      # its full runtime/GC into a js/wasm build (no -ldflags can drop it),
+      # landing around 2.9MB for this program; TinyGo with -opt=z plus a
+      # wasm-opt -Oz pass (installed alongside it below) gets the same
+      # source down to ~330KB. Version pinned to match local dev tooling.
+      - uses: acifani/setup-tinygo@v3
+        with:
+          tinygo-version: '0.41.1'
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+
+      - name: build + smoke-test wasm module
+        run: make wasm-test
+
+      - name: upload wasm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-dist
+          path: dist/wasm/
+          retention-days: 1
+
+  # ── Publish evergreen dev release ───────────────────────────────────────────
+  # Runs only on push to main (not PRs), only after test+wasm both pass.
+  # Overwrites the assets on the fixed `wasm-dev` pre-release tag so that
+  # https://github.com/dimitri/sqlfmt/releases/download/wasm-dev/sqlfmt.wasm
+  # (and .../wasm_exec.js) always point at the latest green HEAD build --
+  # the pattern used for pgloader's v4 JAR (see dimitri/pgloader's
+  # clojure-integration-tests.yml, publish-dev job).
+  publish-wasm-dev:
+    name: Publish wasm-dev release
+    needs: [test, wasm]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: download wasm artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-dist
+          path: dist/wasm/
+
+      - name: name versioned copy of the wasm module
+        id: ver
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          cp dist/wasm/sqlfmt.wasm "dist/wasm/sqlfmt-${SHA}.wasm"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: delete previous versioned wasm assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view wasm-dev --repo ${{ github.repository }} --json assets \
+            --jq '.assets[].name' 2>/dev/null \
+          | grep -E '^sqlfmt-[0-9a-f]+\.wasm$' \
+          | xargs -r -I{} gh release delete-asset wasm-dev {} \
+              --repo ${{ github.repository }} --yes || true
+
+      - name: update wasm-dev release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: wasm-dev
+          name: "sqlfmt — WebAssembly development build"
+          prerelease: true
+          body: |
+            Automated build from `${{ github.ref_name }}` at commit `${{ github.sha }}`.
+
+            All CI tests passed, including the wasm/smoketest.mjs Node
+            smoke test of `globalThis.sqlfmt.format(sql)`.
+
+            **Stable URLs (always latest green HEAD):**
+            ```
+            https://github.com/${{ github.repository }}/releases/download/wasm-dev/sqlfmt.wasm
+            https://github.com/${{ github.repository }}/releases/download/wasm-dev/wasm_exec.js
+            ```
+
+            A pre-compressed copy is also published for callers who want a
+            smaller transfer (GitHub Releases doesn't serve
+            `Content-Encoding`, so this isn't automatic -- see the
+            "WebAssembly build" section of README.md for how to consume it):
+            ```
+            https://github.com/${{ github.repository }}/releases/download/wasm-dev/sqlfmt.wasm.gz
+            ```
+
+            This build: `sqlfmt-${{ steps.ver.outputs.sha }}.wasm`
+          files: |
+            dist/wasm/sqlfmt.wasm
+            dist/wasm/sqlfmt.wasm.gz
+            dist/wasm/wasm_exec.js
+            dist/wasm/sqlfmt-${{ steps.ver.outputs.sha }}.wasm
