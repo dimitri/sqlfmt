@@ -77,14 +77,15 @@ nesting, so this doesn't affect `go build`/`go vet`).
 
 ## The source corpus
 
-The full corpus this style was derived from lives in a sibling repository:
-`/Users/dim/dev/TAOP/TheArtOfPostgreSQL/queries/` — 343 `.sql` files organized
-by book chapter. `testdata/corpus/` here is a flat, renamed ~48-file subset
+The full corpus this style was derived from lives in
+[dimitri/TheArtOfPostgreSQL](https://github.com/dimitri/TheArtOfPostgreSQL)'s
+`queries/` directory — 343 `.sql` files organized by book chapter.
+`testdata/corpus/` here is a flat, renamed ~48-file subset
 (originally curated to cover every formatting pattern documented in
 `STYLE.md` — simple SELECTs, multi-predicate WHERE, JOINs with single- and
 multi-condition ON clauses, CTEs, window functions, CASE expressions, CREATE
 TABLE, multi-statement `begin;`/`commit;` scripts, and comments) without
-requiring the full sibling checkout to exist for `go test` to run.
+requiring a checkout of that repo to exist for `go test` to run.
 
 Each fixture holds `sqlfmt`'s own canonical output over that query, not the
 book's original hand-formatting byte-for-byte — the two usually agree, but
