@@ -116,6 +116,15 @@ format/
                          genuinely different formatting mode from the query
                          clauses — column-name-width alignment, not clause-keyword
                          alignment)
+  comments.go      — rule 18: attachComments (a single pass over the full lexed
+                     stream that removes every comment token and re-expresses it
+                     as metadata -- Comments/TrailingComment -- on a neighboring
+                     real token, so the rest of the engine never sees a raw
+                     comment token in the middle of an expression), reflow of
+                     leading "--" comments to the line-length target with
+                     blank-line/dash-divider preservation, C-style rewrap of
+                     "/* ... */" blocks, and the shared-column alignment pass
+                     for trailing comments
   format_test.go   — corpus round-trip test: format() every file under
                      ../testdata/corpus/, diff against the file's own content.
                      Files under testdata/excluded/ must NOT be included.
