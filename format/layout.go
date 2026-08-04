@@ -170,11 +170,94 @@ func matchWords(toks []Token, i int, words []string) bool {
 	return true
 }
 
+func isJoinModifier(lower string) bool {
+	switch lower {
+	case "left", "right", "full", "inner", "outer", "cross":
+		return true
+	}
+	return false
+}
+
+// splitJoinSegments splits a FROM clause's tokens into the leading table
+// expression and each subsequent JOIN segment (starting at its modifier, if
+// any, else at "join" itself).
+func splitJoinSegments(toks []Token) [][]Token {
+	var segs [][]Token
+	depth := 0
+	start := 0
+	for i, t := range toks {
+		if t.Text == "(" {
+			depth++
+			continue
+		}
+		if t.Text == ")" {
+			depth--
+			continue
+		}
+		if depth != 0 || t.Kind != TokKeyword {
+			continue
+		}
+		if isJoinModifier(t.Lower) {
+			segs = append(segs, toks[start:i])
+			start = i
+			continue
+		}
+		if t.Lower == "join" {
+			prevIsModifier := i > 0 && toks[i-1].Kind == TokKeyword && isJoinModifier(toks[i-1].Lower)
+			if !prevIsModifier {
+				segs = append(segs, toks[start:i])
+				start = i
+			}
+		}
+	}
+	segs = append(segs, toks[start:])
+	return segs
+}
+
+// joinKeywordEnd returns the index just past a join segment's leading
+// keyword phrase (left/right/.../join).
+func joinKeywordEnd(seg []Token) int {
+	kEnd := 0
+	for kEnd < len(seg) && seg[kEnd].Kind == TokKeyword {
+		kEnd++
+	}
+	return kEnd
+}
+
+// maxJoinPhraseLen scans a FROM clause's tokens for the longest join-keyword
+// phrase ("join", "left join", ...) actually present.
+func maxJoinPhraseLen(fromBody []Token) int {
+	max := 0
+	segs := splitJoinSegments(fromBody)
+	for _, seg := range segs[1:] {
+		seg = trimTokens(seg)
+		if len(seg) == 0 {
+			continue
+		}
+		if n := len(flatJoin(seg[:joinKeywordEnd(seg)])); n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+// riverWidth computes the STYLE.md "unifying rule" column width for a query
+// level: the longest clause keyword actually present, or -- when a FROM
+// clause contains a JOIN longer than any clause keyword -- the longest JOIN
+// phrase (plus headroom) instead, so the whole clause list (select/from/
+// where/...) pads consistently with where JOIN's own table names end up.
+// An unindented "left join" would otherwise read as a mistake, not as
+// intentional flush-left alignment the way a bare wide clause keyword does.
 func riverWidth(segs []clauseSeg) int {
 	w := 0
 	for _, s := range segs {
 		if len(s.name) > w {
 			w = len(s.name)
+		}
+		if s.name == "from" {
+			if j := maxJoinPhraseLen(s.body) + 2; j > w {
+				w = j
+			}
 		}
 	}
 	return w
@@ -699,81 +782,17 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 // layoutFrom renders a FROM clause: the first table stays on the FROM line,
 // each JOIN starts a new line. Multiple AND-ed ON predicates are right
 // aligned to the join-keyword-phrase's own end column.
+//
+// width is the same river width riverWidth already computed for every
+// other clause at this level (select/from/where/...), which by
+// construction is wide enough to fit the longest JOIN phrase here too (see
+// riverWidth) -- layoutFrom must reuse it as-is rather than recomputing its
+// own, or its JOIN lines would align to a different column than the "from"
+// keyword itself actually prints at.
 func layoutFrom(toks []Token, baseIndent, width int) []string {
-	isJoinModifier := func(lower string) bool {
-		switch lower {
-		case "left", "right", "full", "inner", "outer", "cross":
-			return true
-		}
-		return false
-	}
-	var segs [][]Token
-	depth := 0
-	start := 0
-	for i, t := range toks {
-		if t.Text == "(" {
-			depth++
-			continue
-		}
-		if t.Text == ")" {
-			depth--
-			continue
-		}
-		if depth != 0 || t.Kind != TokKeyword {
-			continue
-		}
-		if isJoinModifier(t.Lower) {
-			segs = append(segs, toks[start:i])
-			start = i
-			continue
-		}
-		if t.Lower == "join" {
-			prevIsModifier := i > 0 && toks[i-1].Kind == TokKeyword && isJoinModifier(toks[i-1].Lower)
-			if !prevIsModifier {
-				segs = append(segs, toks[start:i])
-				start = i
-			}
-		}
-	}
-	segs = append(segs, toks[start:])
+	segs := splitJoinSegments(toks)
 
-	// join keyword phrase = leading keyword tokens (left/right/.../join) of
-	// each join segment.
-	joinKeywordEnd := func(seg []Token) int {
-		kEnd := 0
-		for kEnd < len(seg) && seg[kEnd].Kind == TokKeyword {
-			kEnd++
-		}
-		return kEnd
-	}
-
-	// The join-phrase column is its own mini river alignment: every join
-	// phrase present ends at the same column, one column left of where
-	// table names start (STYLE.md rule 9's multi-predicate ON example).
-	// That column is never narrower than the query-clause river width, so
-	// FROM's own table and every JOIN's table start in the same column.
-	maxPhraseLen := 0
-	for _, seg := range segs[1:] {
-		seg = trimTokens(seg)
-		if len(seg) == 0 {
-			continue
-		}
-		if n := len(flatJoin(seg[:joinKeywordEnd(seg)])); n > maxPhraseLen {
-			maxPhraseLen = n
-		}
-	}
-	// A join phrase that happens to be the single widest word in the local
-	// alignment gets a couple of columns of headroom rather than landing
-	// flush at baseIndent -- unlike the top-level clause river, an
-	// unindented "left join" reads as a mistake, not as intentional
-	// alignment (STYLE.md rule 9 corpus examples always show JOIN
-	// indented relative to FROM).
-	effectiveWidth := width
-	if maxPhraseLen+2 > effectiveWidth {
-		effectiveWidth = maxPhraseLen + 2
-	}
-
-	joinCol := baseIndent + effectiveWidth + 1
+	joinCol := baseIndent + width + 1
 	phraseEndCol := joinCol - 1
 	firstLines := renderRun(trimTokens(segs[0]), joinCol)
 	out := firstLines

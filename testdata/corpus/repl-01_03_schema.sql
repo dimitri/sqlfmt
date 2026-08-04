@@ -53,13 +53,13 @@ group by article.id
 order by count desc
    limit 5;
 
-  select category.name,
-         count(distinct article.id) as articles,
-         count(*) as comments
-    from sandbox.category
+     select category.name,
+            count(distinct article.id) as articles,
+            count(*) as comments
+       from sandbox.category
   left join sandbox.article on article.category = category.id
   left join sandbox.comment on comment.article = article.id
-group by category.name
-order by category.name;
+   group by category.name
+   order by category.name;
 
 rollback;
