@@ -24,6 +24,9 @@ function assertEqual(got, want, label) {
   }
 }
 
+assertEqual(typeof globalThis.sqlfmt.version, "string", "version: is a string");
+assertEqual(globalThis.sqlfmt.version.length > 0, true, "version: is non-empty");
+
 const ok = globalThis.sqlfmt.format("select id,name from users where id=1;");
 assertEqual(ok.error, undefined, "valid SQL: no error");
 assertEqual(ok.output, "select id, name\n  from users\n where id = 1;\n", "valid SQL: output");

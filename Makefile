@@ -3,14 +3,45 @@ WASM_DIR := dist/wasm
 GO       := go
 TINYGO   := tinygo
 WASM_OPT := wasm-opt
+INSTALL  := install
 CORPUS   := $(shell find testdata/corpus -name '*.sql')
 
-.PHONY: all build test wasm wasm-test clean
+# VERSION_BASE is bumped by hand on release. A build made exactly at a git
+# tag (a real release checkout) reports that bare version; any other build
+# -- a working branch, a random commit -- appends ".g<short-sha>" so its
+# provenance is traceable, the same "g<sha>" convention `git describe` itself
+# uses. A tree with no git metadata at all (e.g. a source tarball) falls
+# back to the bare version.
+VERSION_BASE := 0.1
+GIT_TAG      := $(shell git describe --tags --exact-match 2>/dev/null)
+GIT_SHA      := $(shell git rev-parse --short HEAD 2>/dev/null)
+ifneq ($(GIT_TAG),)
+VERSION := $(VERSION_BASE)
+else ifneq ($(GIT_SHA),)
+VERSION := $(VERSION_BASE).g$(GIT_SHA)
+else
+VERSION := $(VERSION_BASE)
+endif
+
+# PREFIX/DESTDIR follow the GNU Coding Standards / Debian Policy convention
+# (https://www.gnu.org/prep/standards/html_node/DESTDIR.html): PREFIX picks
+# the install tree (packagers override to /usr; left at /usr/local for a
+# plain `make install`), DESTDIR stages that tree under a build root without
+# baking the root into the installed binary's own path. A `debian/rules`
+# using debhelper's default `dh_auto_install` already invokes exactly
+# `make install DESTDIR=debian/<pkg>` for a plain Makefile like this one, so
+# no other packaging glue is needed for that half of it. The target
+# directory itself is not created here -- it's expected to already exist
+# (packaging tooling, or a standard /usr/local/bin on a real system).
+PREFIX  ?= /usr/local
+BINDIR  := $(DESTDIR)$(PREFIX)/bin
+
+.PHONY: all build test wasm wasm-test install uninstall clean
 
 all: build
 
 build:
-	$(GO) build -o $(BINARY) ./cmd/sqlfmt
+	$(GO) build -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/sqlfmt
 
 test: build
 	$(GO) test ./...
@@ -21,6 +52,12 @@ test: build
 		echo "$$dirty"; \
 		exit 1; \
 	fi
+
+install: build
+	$(INSTALL) -m 0755 $(BINARY) $(BINDIR)/sqlfmt
+
+uninstall:
+	rm -f $(BINDIR)/sqlfmt
 
 # Builds the browser WebAssembly module (globalThis.sqlfmt.format(sql)) plus
 # the wasm_exec.js glue it needs, into $(WASM_DIR), along with pre-compressed
@@ -38,7 +75,7 @@ test: build
 # "WebAssembly build" section of README.md for install instructions.
 wasm:
 	mkdir -p $(WASM_DIR)
-	$(TINYGO) build -o $(WASM_DIR)/sqlfmt.wasm -target=wasm -no-debug -opt=z ./wasm
+	$(TINYGO) build -ldflags "-X main.version=$(VERSION)" -o $(WASM_DIR)/sqlfmt.wasm -target=wasm -no-debug -opt=z ./wasm
 	$(WASM_OPT) -Oz -o $(WASM_DIR)/sqlfmt.wasm $(WASM_DIR)/sqlfmt.wasm
 	cp "$$($(TINYGO) env TINYGOROOT)/targets/wasm_exec.js" $(WASM_DIR)/wasm_exec.js
 	node wasm/compress.mjs
