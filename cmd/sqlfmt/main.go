@@ -15,10 +15,16 @@ import (
 	"github.com/dimitri/sqlfmt/format"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=...";
+// see the VERSION computation in the Makefile.
+var version = "0.1"
+
 var (
-	write  = flag.Bool("w", false, "write result to (source) file instead of stdout")
-	list   = flag.Bool("l", false, "list files whose formatting differs from sqlfmt's")
-	doDiff = flag.Bool("d", false, "display diffs instead of rewriting files")
+	write      = flag.Bool("w", false, "write result to (source) file instead of stdout")
+	list       = flag.Bool("l", false, "list files whose formatting differs from sqlfmt's")
+	doDiff     = flag.Bool("d", false, "display diffs instead of rewriting files")
+	showVer    = flag.Bool("V", false, "print version and exit")
+	showVerLon = flag.Bool("version", false, "print version and exit")
 )
 
 func main() {
@@ -27,6 +33,11 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if *showVer || *showVerLon {
+		fmt.Println("sqlfmt", version)
+		return
+	}
 
 	if flag.NArg() == 0 {
 		if err := processReader(os.Stdin, "<standard input>"); err != nil {

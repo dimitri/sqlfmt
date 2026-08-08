@@ -44,6 +44,7 @@ $ sqlfmt -w query.sql           # rewrite the file in place
 $ sqlfmt -l queries/**/*.sql    # list files whose formatting would change
 $ sqlfmt -d query.sql           # show a unified diff instead of full output
 $ cat query.sql | sqlfmt        # stdin -> stdout, pipeable
+$ sqlfmt -V                     # print the version and exit
 ```
 
 As a library: `import "github.com/dimitri/sqlfmt/format"` (module path TBD —
@@ -52,6 +53,30 @@ like `app.taop.xyz`'s `cmd/sqlbuild` book-build tool can format embedded
 queries in-process without shelling out to the binary. The library lives in
 its own `format/` subpackage (rather than at the module root) specifically
 so it stays easily importable on its own, independent of the CLI.
+
+## Building and installing
+
+```console
+$ make build              # -> bin/sqlfmt
+$ make test                # build + go test + corpus canonical-formatting check
+$ make install              # install bin/sqlfmt to $(DESTDIR)$(PREFIX)/bin
+$ make uninstall             # remove it again
+```
+
+`PREFIX` defaults to `/usr/local`; `DESTDIR` stages that tree under a build
+root without baking the root into the installed binary's own path, the
+standard GNU Coding Standards / Debian Policy convention. A `debian/rules`
+using debhelper's default `dh_auto_install` already invokes exactly
+`make install DESTDIR=debian/<pkg>` for a plain Makefile like this one, so no
+further packaging glue is needed on that side. `install` does not create the
+target directory itself — it's expected to already exist (packaging tooling
+creates it, or it's a standard path like `/usr/local/bin` on a real system).
+
+`sqlfmt -V` reports the version: `0.1` for a build made exactly at a git tag,
+or `0.1.g<short-sha>` for any other build (a working branch, an arbitrary
+commit) — the same `g<sha>` convention `git describe` itself uses, so a
+report of unexpected formatter behavior can always be tied back to the exact
+commit that produced it.
 
 ## Editor integration
 
