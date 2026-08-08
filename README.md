@@ -124,13 +124,20 @@ binary.
 ## WebAssembly build
 
 `wasm/` compiles the `format` library to WebAssembly for in-browser use,
-exposing a single global JS function:
+exposing:
 
 ```js
 sqlfmt.format(sql)
 //  -> { output: string } on success
 //  -> { error: string }  on a real parse/format error
+
+sqlfmt.version
+//  -> "0.1" or "0.1.g<short-sha>", same value and scheme as `sqlfmt -V`
 ```
+
+`sqlfmt.version` follows the same convention several other JS libraries use
+for a top-level version string on their namespace object — `React.version`,
+`Vue.version`, `d3.version`.
 
 Built with [TinyGo](https://tinygo.org) (`tinygo build -target=wasm -no-debug
 -opt=z`) plus a [Binaryen](https://github.com/WebAssembly/binaryen)

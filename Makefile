@@ -75,7 +75,7 @@ uninstall:
 # "WebAssembly build" section of README.md for install instructions.
 wasm:
 	mkdir -p $(WASM_DIR)
-	$(TINYGO) build -o $(WASM_DIR)/sqlfmt.wasm -target=wasm -no-debug -opt=z ./wasm
+	$(TINYGO) build -ldflags "-X main.version=$(VERSION)" -o $(WASM_DIR)/sqlfmt.wasm -target=wasm -no-debug -opt=z ./wasm
 	$(WASM_OPT) -Oz -o $(WASM_DIR)/sqlfmt.wasm $(WASM_DIR)/sqlfmt.wasm
 	cp "$$($(TINYGO) env TINYGOROOT)/targets/wasm_exec.js" $(WASM_DIR)/wasm_exec.js
 	node wasm/compress.mjs
