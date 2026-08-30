@@ -1013,6 +1013,19 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 	return preds, ops
 }
 
+// wholeParen reports whether toks is exactly one parenthesized group, and
+// if so returns its contents.
+func wholeParen(toks []Token) ([]Token, bool) {
+	toks = trimTokens(toks)
+	if len(toks) < 3 || toks[0].Text != "(" {
+		return nil, false
+	}
+	if matchParen(toks, 0) != len(toks)-1 {
+		return nil, false
+	}
+	return trimTokens(toks[1 : len(toks)-1]), true
+}
+
 // betweenAndAt reports whether the "and" at index i is the one belonging to
 // a BETWEEN in the same predicate -- i.e. whether an unconsumed "between"
 // appears between the start of the current predicate and that "and". A
@@ -1070,6 +1083,28 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 			}
 		}
 		return lines
+	}
+
+	// A fully parenthesized query -- the arms of "(select ...) except
+	// (select ...)" are written this way -- has every clause keyword at
+	// depth 1, so splitClauses finds none and the whole arm used to come
+	// back as one flat line, hundreds of columns wide. Unwrap, format the
+	// query inside, and put the parens back.
+	// "(select ...) order by x" -- a parenthesized arm with trailing
+	// clauses of its own. Format the group, then the clauses after it.
+	if len(toks) > 0 && toks[0].Text == "(" {
+		if close := matchParen(toks, 0); close > 0 && close < len(toks)-1 {
+			head := formatQuerySegment(toks[:close+1], baseIndent)
+			return append(head, formatQuerySegment(toks[close+1:], baseIndent)...)
+		}
+	}
+	if inner, ok := wholeParen(toks); ok {
+		body := formatQuerySegment(inner, baseIndent+1)
+		if len(body) > 0 {
+			body[0] = strings.Repeat(" ", baseIndent) + "(" + strings.TrimLeft(body[0], " ")
+			body = append(body, strings.Repeat(" ", baseIndent)+")")
+			return body
+		}
 	}
 
 	segs := splitClauses(toks)

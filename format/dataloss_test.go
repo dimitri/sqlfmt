@@ -216,3 +216,28 @@ func TestAllFixesIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// TestParenthesizedSetOperationArms: "(select ...) except (select ...)" has
+// every clause keyword at depth 1, so splitClauses found none and the whole
+// arm came back as one flat line -- 434 columns in the worst corpus case.
+func TestParenthesizedSetOperationArms(t *testing.T) {
+	src := "(select d.surname from results res join races r on r.raceid = res.raceid where r.year = 2016 and res.positionorder = 1) except (select d.surname from results res join races r on r.raceid = res.raceid where r.year = 2017 and res.positionorder = 1) order by surname;"
+	got := mustFormat(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	if n := strings.Count(got, "\n(select"); n < 1 {
+		t.Errorf("arms not formatted as queries:\n%s", got)
+	}
+	if !strings.Contains(got, "\nexcept\n") {
+		t.Errorf("set operator not on its own line:\n%s", got)
+	}
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), "order by surname;") {
+		t.Errorf("trailing ORDER BY lost or misplaced:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+}

@@ -134,6 +134,16 @@ func formatStatement(toks []Token) string {
 		lines = formatQuerySegment(body, 0)
 	case "explain":
 		lines = layoutExplain(body)
+	case "":
+		// A statement that opens with "(" -- the parenthesized arms of a
+		// set operation -- is still a query, and formatQuerySegment knows
+		// how to unwrap it. Anything else with no leading keyword falls
+		// through to the flat default below.
+		if len(body) > 0 && body[0].Text == "(" {
+			lines = formatQuerySegment(body, 0)
+		} else {
+			lines = []string{flatJoin(body)}
+		}
 	default:
 		lines = []string{flatJoin(body)}
 	}
