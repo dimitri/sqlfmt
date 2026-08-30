@@ -151,10 +151,21 @@ func formatStatement(toks []Token) string {
 }
 
 // layoutExplain renders EXPLAIN per STYLE.md rule 19: the EXPLAIN prefix
-// (with its option list, if any) alone on the first line, then the
-// statement it wraps formatted exactly as if it had been written on its
-// own -- its own clause river, unindented. That is what the corpus does in
-// 185 of 192 cases.
+// (with its option list, if any) takes a line of its own, and is padded
+// into the same clause river as the statement it wraps -- "explain" is a
+// clause keyword like "select" or "order by", not a thing bolted on above
+// them:
+//
+//	explain (analyze, buffers)
+//	 select res.raceid, res.points
+//	   from f1db.results res
+//	  where res.points >= 10;
+//
+// That falls out of clauseWords listing "explain": splitClauses yields it
+// as an ordinary segment whose body is the option list, riverWidth sizes
+// the river with it included, and renderClause pads it. So a query whose
+// longest clause keyword is wider than "explain" indents the EXPLAIN line
+// instead, exactly as it would any other short clause keyword.
 //
 // Both spellings of the prefix are handled: the modern parenthesized option
 // list ("explain (analyze, buffers) select ...") and the legacy bare form
@@ -163,11 +174,37 @@ func formatStatement(toks []Token) string {
 // exactly those is precise rather than a guess about where the inner
 // statement starts.
 //
-// The wrapped statement is dispatched back through formatStatement, which
-// is what makes "explain (analyze) execute p(1)" and "explain select ..."
-// each come out formatted the way that statement would be on its own.
+// A payload that is not a clause-river query -- "explain execute p(1)", or
+// anything starting with WITH, whose CTE list has a layout of its own that
+// no single river spans -- can't participate in a river, so it falls back
+// to an unpadded prefix line plus that statement formatted as it would be
+// on its own.
 func layoutExplain(toks []Token) []string {
-	prefix := []Token{toks[0]}
+	prefix, rest := splitExplainPrefix(toks)
+
+	// "explain" with nothing after it is not a statement we can improve on.
+	if len(rest) == 0 {
+		return []string{plainJoin(prefix)}
+	}
+
+	if explainPayloadJoinsRiver(rest) {
+		return formatQuerySegment(toks, 0)
+	}
+
+	// plainJoin would render "explain(analyze)" -- spaceBetween treats "("
+	// after a name as a call, per STYLE.md rule 4. The option list is not a
+	// call, so the space goes in here.
+	head := prefix[0].Text
+	if len(prefix) > 1 {
+		head += " " + plainJoin(prefix[1:])
+	}
+	return append([]string{head}, strings.Split(formatStatement(rest), "\n")...)
+}
+
+// splitExplainPrefix splits "explain [ (opts) | analyze verbose ]" off the
+// front of toks, returning the prefix tokens and the statement they wrap.
+func splitExplainPrefix(toks []Token) (prefix, rest []Token) {
+	prefix = []Token{toks[0]}
 	i := 1
 
 	if i < len(toks) && toks[i].Text == "(" {
@@ -193,23 +230,22 @@ func layoutExplain(toks []Token) []string {
 			i++
 		}
 	}
+	return prefix, trimTokens(toks[i:])
+}
 
-	// "explain" with nothing after it is not a statement we can improve on.
-	rest := trimTokens(toks[i:])
-	if len(rest) == 0 {
-		return []string{plainJoin(prefix)}
+// explainPayloadJoinsRiver reports whether the statement an EXPLAIN wraps is
+// one whose clauses form a single river the EXPLAIN line can be padded into.
+// WITH is excluded deliberately: formatQuerySegment gives a CTE list its own
+// per-CTE layout, with no top-level river to join.
+func explainPayloadJoinsRiver(rest []Token) bool {
+	if len(rest) == 0 || rest[0].Kind != TokKeyword {
+		return false
 	}
-
-	// plainJoin would render "explain(analyze)" -- spaceBetween treats "("
-	// after a name as a call, per STYLE.md rule 4. The option list is not a
-	// call, so the space goes in here.
-	head := prefix[0].Text
-	if len(prefix) > 1 {
-		head += " " + plainJoin(prefix[1:])
+	switch rest[0].Lower {
+	case "select", "insert", "update", "delete", "values", "table":
+		return true
 	}
-
-	lines := []string{head}
-	return append(lines, strings.Split(formatStatement(rest), "\n")...)
+	return false
 }
 
 // layoutCreateTable renders "create table name ( col ..., ... );" per

@@ -116,11 +116,17 @@ format/
                          genuinely different formatting mode from the query
                          clauses — column-name-width alignment, not clause-keyword
                          alignment)
-                       - EXPLAIN (rule 19, in format.go's layoutExplain): a
-                         prefix line plus a recursive formatStatement call on
-                         the statement it wraps, so the wrapped query gets
-                         whichever layout it would have had on its own rather
-                         than a second EXPLAIN-specific code path
+                       - EXPLAIN (rule 19): "explain" is simply an entry in
+                         clauseWords, so splitClauses yields it as an ordinary
+                         segment (body = the option list), riverWidth sizes the
+                         river with it included, and renderClause pads it --
+                         no EXPLAIN-specific layout code at all. It is the one
+                         clauseWords entry marked leadingOnly, since EXPLAIN is
+                         only ever a statement prefix and "select explain from
+                         t" must stay one clause. format.go's layoutExplain
+                         only handles the payloads that have no river to join
+                         (EXECUTE, WITH), falling back to a prefix line plus a
+                         recursive formatStatement call
   comments.go      — rule 18: attachComments (a single pass over the full lexed
                      stream that removes every comment token and re-expresses it
                      as metadata -- Comments/TrailingComment -- on a neighboring
