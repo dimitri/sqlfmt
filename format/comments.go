@@ -117,9 +117,19 @@ func formatLineComment(c Token, indent int) []string {
 	if isDashOnly(c.Text) {
 		return []string{strings.Repeat(" ", indent) + c.Text}
 	}
-	content := strings.TrimSpace(strings.TrimPrefix(c.Text, "--"))
+	body := strings.TrimPrefix(c.Text, "--")
+	content := strings.TrimSpace(body)
 	if content == "" {
 		return []string{strings.Repeat(" ", indent) + "--"}
+	}
+	// A comment whose text is itself indented is laid out on purpose --
+	// an EXPLAIN plan sketch, an ASCII diagram, a column of aligned
+	// values -- and reflowing it to the width destroys the only thing it
+	// was communicating. Reflow prose, which starts right after the
+	// "-- "; preserve anything indented further, the same way a dash-only
+	// divider is preserved above.
+	if strings.HasPrefix(body, "  ") {
+		return []string{strings.Repeat(" ", indent) + "--" + strings.TrimRight(body, " \t")}
 	}
 	return wrapWords(strings.Fields(content), indent, "-- ")
 }

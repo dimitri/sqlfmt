@@ -136,25 +136,26 @@ func splitUnionSegments(toks []Token) (segs [][]Token, ops []string) {
 			continue
 		}
 		switch t.Lower {
-		case "union":
+		case "union", "intersect", "except":
+			// All three take an optional ALL or DISTINCT modifier, and it
+			// belongs to the operator, not to the query that follows it.
+			// Only UNION used to consume it: "except all select ..." left
+			// "all" as the first token of the next segment, which rendered
+			// as a stray "all select ..." line -- and, in a segment the
+			// layout then recursed into, could be dropped outright. Losing
+			// it silently turns EXCEPT ALL into EXCEPT, which is a
+			// different result set, not a formatting difference.
 			end := i + 1
-			op := "union"
-			if end < len(toks) && toks[end].Kind == TokKeyword && toks[end].Lower == "all" {
-				op = "union all"
+			op := t.Lower
+			if end < len(toks) && toks[end].Kind == TokKeyword &&
+				(toks[end].Lower == "all" || toks[end].Lower == "distinct") {
+				op += " " + toks[end].Lower
 				end++
 			}
 			segs = append(segs, toks[start:i])
 			ops = append(ops, op)
 			start = end
 			i = end - 1
-		case "intersect":
-			segs = append(segs, toks[start:i])
-			ops = append(ops, "intersect")
-			start = i + 1
-		case "except":
-			segs = append(segs, toks[start:i])
-			ops = append(ops, "except")
-			start = i + 1
 		}
 	}
 	segs = append(segs, toks[start:])
@@ -727,36 +728,94 @@ func splitTopLevelTwoWord(toks []Token, w1, w2 string) [][]Token {
 	return [][]Token{toks}
 }
 
+// layoutOver renders a long OVER(...) with PARTITION BY, ORDER BY, and any
+// frame clause each on its own line under the opening paren's column, per
+// STYLE.md rule 14.
+//
+// splitTopLevelTwoWord returns [before, after]. The ORDER BY search used to
+// run over segs[0] -- the tokens *before* PARTITION BY, which for the usual
+// "over(partition by x order by y)" is empty -- so it never matched: the
+// whole body went out on the "partition by" line and only the ")" moved
+// down, giving a 90+ column line with an orphaned paren under it.
+// Everything after PARTITION BY has to be searched instead.
 func layoutOver(toks []Token, overCol int) []string {
 	openCol := overCol + len("over(")
 	// toks: over ( ... )
 	inner := toks[2 : len(toks)-1]
-	segs := splitTopLevelTwoWord(inner, "partition", "by")
-	var lines []string
-	first := true
+
+	// "over(" keeps a line of its own, with every window clause under the
+	// opening paren's column -- the shape the corpus already uses.
+	lines := []string{"over("}
 	emit := func(prefix string, body []Token) {
-		bodyLines := renderRun(body, openCol+len(prefix))
-		text := strings.Repeat(" ", openCol) + prefix + strings.TrimSpace(bodyLines[0])
-		if first {
-			lines = append(lines, "over("+strings.TrimPrefix(text, strings.Repeat(" ", openCol)))
-			first = false
-		} else {
-			lines = append(lines, text)
+		body = trimTokens(body)
+		if len(body) == 0 {
+			return
 		}
+		bodyLines := renderRun(body, openCol+len(prefix))
+		lines = append(lines, strings.Repeat(" ", openCol)+prefix+strings.TrimSpace(bodyLines[0]))
 		lines = append(lines, bodyLines[1:]...)
 	}
-	if len(segs) == 2 {
-		emit("partition by ", segs[1])
+
+	rest := inner
+	if segs := splitTopLevelTwoWord(inner, "partition", "by"); len(segs) == 2 {
+		// segs[1] is everything after "partition by": the partition
+		// expression list, then any ORDER BY and frame clause.
+		partition, tail := segs[1], []Token(nil)
+		if o := splitTopLevelTwoWord(segs[1], "order", "by"); len(o) == 2 {
+			partition, tail = o[0], o[1]
+			emit("partition by ", partition)
+			emit("order by ", frameSplit(&tail))
+			rest = tail
+		} else {
+			partition, rest = splitFrame(segs[1])
+			emit("partition by ", partition)
+		}
+	} else if o := splitTopLevelTwoWord(inner, "order", "by"); len(o) == 2 {
+		tail := o[1]
+		emit("order by ", frameSplit(&tail))
+		rest = tail
 	} else {
-		lines = append(lines, "over(")
-		first = false
+		body, frame := splitFrame(inner)
+		emit("", body)
+		rest = frame
 	}
-	orderSegs := splitTopLevelTwoWord(segs[0], "order", "by")
-	if len(orderSegs) == 2 {
-		emit("order by ", orderSegs[1])
-	}
+	// Whatever is left is the frame clause ("rows between ...",
+	// "range ...", "groups ...", with an optional "exclude ...").
+	emit("", rest)
+
 	lines = append(lines, strings.Repeat(" ", overCol)+")")
 	return lines
+}
+
+// frameStarters are the keywords that begin a window frame clause, which
+// rule 14 puts on a line of its own after PARTITION BY / ORDER BY.
+var frameStarters = map[string]bool{"rows": true, "range": true, "groups": true}
+
+// splitFrame splits a window-clause token run at the start of its frame
+// clause, returning the part before it and the frame itself (nil when there
+// is no frame).
+func splitFrame(toks []Token) (body, frame []Token) {
+	depth := 0
+	for i, t := range toks {
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth == 0 && t.Kind == TokKeyword && frameStarters[t.Lower]:
+			return toks[:i], toks[i:]
+		}
+	}
+	return toks, nil
+}
+
+// frameSplit peels the frame clause off *tail, leaving *tail holding just
+// the frame and returning the part before it -- a small helper so the
+// ORDER BY body and the frame can be emitted as two separate lines.
+func frameSplit(tail *[]Token) []Token {
+	body, frame := splitFrame(*tail)
+	*tail = frame
+	return body
 }
 
 // layoutCommaList renders a comma-separated list. If the flat form fits
@@ -938,6 +997,13 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 		} else if t.Text == ")" {
 			depth--
 		} else if depth == 0 && t.Kind == TokKeyword && (t.Lower == "and" || t.Lower == "or") {
+			// The "and" in "between X and Y" joins the two bounds of one
+			// predicate; it is not a boolean conjunction, and splitting on
+			// it turned "where y between 2010 and 2017" into two lines that
+			// read as two separate conditions.
+			if t.Lower == "and" && betweenAndAt(toks, start, i) {
+				continue
+			}
 			preds = append(preds, toks[start:i])
 			ops = append(ops, t.Lower)
 			start = i + 1
@@ -945,6 +1011,30 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 	}
 	preds = append(preds, toks[start:])
 	return preds, ops
+}
+
+// betweenAndAt reports whether the "and" at index i is the one belonging to
+// a BETWEEN in the same predicate -- i.e. whether an unconsumed "between"
+// appears between the start of the current predicate and that "and". A
+// second BETWEEN inside the same predicate would each claim their own
+// "and", so they are counted rather than merely detected.
+func betweenAndAt(toks []Token, start, i int) bool {
+	depth, pending := 0, 0
+	for j := start; j < i; j++ {
+		t := toks[j]
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth != 0:
+		case t.Kind == TokKeyword && t.Lower == "between":
+			pending++
+		case t.Kind == TokKeyword && t.Lower == "and" && pending > 0:
+			pending--
+		}
+	}
+	return pending > 0
 }
 
 // formatQuerySegment formats a SELECT/INSERT/UPDATE/DELETE (optionally
@@ -1188,14 +1278,25 @@ func parseCTEs(toks []Token) ([][]Token, []Token) {
 				i = close + 1
 			}
 		}
-		// optional "as"
+		// optional "as", then the optional materialization hint
+		// ("as materialized (" / "as not materialized ("). Without
+		// consuming the hint the "(" test below failed, the CTE body was
+		// never taken, and everything from "materialized" onwards fell out
+		// into the tail -- which is how a MATERIALIZED CTE lost its body.
 		if i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "as" {
 			i++
+			i = skipMaterialized(toks, i)
 		}
 		if i < len(toks) && toks[i].Text == "(" {
 			close := matchParen(toks, i)
 			i = close + 1
 		}
+		// A recursive CTE may be followed by SEARCH and/or CYCLE clauses,
+		// which belong to it rather than to the statement after it. Left in
+		// the tail they were parsed as part of the main query, where CYCLE's
+		// own "set" reads as an UPDATE clause keyword and the clause got
+		// mangled.
+		i = skipSearchCycle(toks, i)
 		ctes = append(ctes, toks[start:i])
 		if i < len(toks) && toks[i].Text == "," {
 			i++
@@ -1204,6 +1305,52 @@ func parseCTEs(toks []Token) ([][]Token, []Token) {
 		break
 	}
 	return ctes, toks[i:]
+}
+
+// skipMaterialized advances past an optional "materialized" /
+// "not materialized" hint following a CTE's "as".
+func skipMaterialized(toks []Token, i int) int {
+	if i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "not" {
+		if i+1 < len(toks) && toks[i+1].Lower == "materialized" {
+			return i + 2
+		}
+		return i
+	}
+	if i < len(toks) && toks[i].Lower == "materialized" {
+		return i + 1
+	}
+	return i
+}
+
+// skipSearchCycle advances past the SEARCH and CYCLE clauses a recursive
+// CTE may carry, so they stay attached to the CTE they qualify:
+//
+//	search depth first by id set ordercol
+//	cycle id set is_cycle using path
+//
+// Both run to the next "," or to the statement's main SELECT.
+func skipSearchCycle(toks []Token, i int) int {
+	// "search"/"cycle" are not in the keyword table -- they lex as plain
+	// identifiers -- so match on the text, not on Kind.
+	for i < len(toks) && (toks[i].Lower == "search" || toks[i].Lower == "cycle") {
+		i++
+		depth := 0
+		for i < len(toks) {
+			t := toks[i]
+			if t.Text == "(" {
+				depth++
+			} else if t.Text == ")" {
+				depth--
+			} else if depth == 0 && t.Kind == TokKeyword &&
+				(t.Lower == "select" || t.Lower == "search" || t.Lower == "cycle") {
+				break
+			} else if depth == 0 && t.Text == "," {
+				break
+			}
+			i++
+		}
+	}
+	return i
 }
 
 // renderCTE renders one "name [(cols)] as ( body )" CTE entry. withPrefix,
@@ -1223,8 +1370,13 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 			i = colClose + 1
 		}
 	}
+	asText := " as ("
 	if i < len(cte) && cte[i].Kind == TokKeyword && cte[i].Lower == "as" {
 		i++
+		if j := skipMaterialized(cte, i); j > i {
+			asText = " as " + plainJoin(cte[i:j]) + " ("
+			i = j
+		}
 	}
 	open := -1
 	if i < len(cte) && cte[i].Text == "(" {
@@ -1238,11 +1390,14 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 	bodyIndent := baseIndent + 2
 	bodyLines := formatQuerySegment(inner, bodyIndent)
 	lines := lead
-	lines = append(lines, strings.Repeat(" ", baseIndent)+name+" as (")
+	lines = append(lines, strings.Repeat(" ", baseIndent)+name+asText)
 	for _, l := range bodyLines {
 		lines = append(lines, strings.Repeat(" ", bodyIndent)+l)
 	}
 	closing := strings.Repeat(" ", baseIndent) + ")"
+	if tail := trimTokens(cte[close+1:]); len(tail) > 0 {
+		closing += " " + plainJoin(tail)
+	}
 	if more {
 		closing += ","
 	}

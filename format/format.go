@@ -254,15 +254,47 @@ func explainPayloadJoinsRiver(rest []Token) bool {
 // left-padded to a common width so data types start in the same column,
 // table-level constraints separated by a blank line, closing ")" at the
 // opening "("'s indent.
-func layoutCreateTable(toks []Token) []string {
-	open := -1
+// createTableColumnList returns the index of the "(" opening a CREATE
+// TABLE's column list, or -1 when the statement has none. The column list
+// is the first "(" that follows the table name directly; anything with a
+// keyword in between ("partition of t for values from (", "as select ... (")
+// is some other construct's paren, and treating it as the column list
+// mangled the statement and dropped everything after it.
+func createTableColumnList(toks []Token) int {
 	for i, t := range toks {
-		if t.Text == "(" {
-			open = i
-			break
+		if t.Text != "(" {
+			continue
+		}
+		for j := 2; j < i; j++ {
+			if toks[j].Kind == TokKeyword && toks[j].Lower != "if" &&
+				toks[j].Lower != "not" && toks[j].Lower != "exists" {
+				return -1
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+// createTableAsBody returns the index of the statement a CREATE TABLE ... AS
+// wraps, or -1 if this is not a CTAS. The wrapped statement is then
+// formatted as it would be on its own.
+func createTableAsBody(toks []Token) int {
+	for i, t := range toks {
+		if t.Kind == TokKeyword && t.Lower == "as" && i+1 < len(toks) {
+			return i + 1
 		}
 	}
+	return -1
+}
+
+func layoutCreateTable(toks []Token) []string {
+	open := createTableColumnList(toks)
 	if open == -1 {
+		if body := createTableAsBody(toks); body != -1 {
+			head := flatJoin(toks[:body])
+			return append([]string{head}, strings.Split(formatStatement(toks[body:]), "\n")...)
+		}
 		return []string{flatJoin(toks)}
 	}
 	header := flatJoin(toks[:open])
@@ -312,6 +344,13 @@ func layoutCreateTable(toks []Token) []string {
 		lines = append(lines, rest[1:]...)
 		prevWasColumn = true
 	}
-	lines = append(lines, ")")
+	// Whatever follows the column list belongs to the statement and must
+	// not be dropped: PARTITION BY, INHERITS, TABLESPACE, WITH (...), the
+	// lot. Losing it silently turned a partitioned table into a plain one.
+	closing := ")"
+	if tail := trimTokens(toks[close+1:]); len(tail) > 0 {
+		closing += " " + flatJoin(tail)
+	}
+	lines = append(lines, closing)
 	return lines
 }
