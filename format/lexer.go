@@ -68,6 +68,15 @@ var keywords = buildKeywordSet([]string{
 	"lateral", "only", "of", "to", "for",
 	"conflict", "do", "nothing", "constraint", "foreign", "materialized",
 	"explain",
+	// DDL words, so rule 1 lowercases them consistently: without these a
+	// CREATE TRIGGER came out as "create TRIGGER ... for EACH row", with
+	// the words in the keyword table lowercased and the rest left as
+	// typed. "cost" is deliberately omitted -- far too plausible a column
+	// name to start treating as a keyword.
+	"trigger", "procedure", "each", "after", "before", "execute", "returns",
+	"index", "view", "statistics", "sequence", "include", "tablespace",
+	"immutable", "stable", "volatile", "strict", "parallel", "security",
+	"definer", "invoker", "concurrently", "unlogged", "inherits",
 })
 
 func buildKeywordSet(words []string) map[string]bool {

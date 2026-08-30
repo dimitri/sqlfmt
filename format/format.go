@@ -84,8 +84,32 @@ func statementKeyword(toks []Token) string {
 		return ""
 	}
 	first := toks[0].Lower
-	if first == "create" && len(toks) > 1 && toks[1].Kind == TokKeyword && toks[1].Lower == "table" {
-		return "create table"
+	if first == "create" || first == "drop" || first == "alter" {
+		// Skip the optional "or replace" / "unique" / "materialized" /
+		// "if not exists" noise between the verb and the object kind.
+		for i := 1; i < len(toks) && i < 6; i++ {
+			if toks[i].Kind != TokKeyword && toks[i].Kind != TokIdent {
+				break
+			}
+			switch toks[i].Lower {
+			case "or", "replace", "unique", "if", "not", "exists", "recursive",
+				"temp", "temporary", "unlogged", "concurrently":
+				continue
+			case "table", "index", "function", "view", "trigger", "statistics",
+				"sequence", "procedure", "materialized":
+				kind := toks[i].Lower
+				if kind == "materialized" {
+					// "create materialized view" lays out as a view.
+					kind = "view"
+				}
+				if first == "create" {
+					return "create " + kind
+				}
+				return first
+			default:
+				return first
+			}
+		}
 	}
 	return first
 }
@@ -130,6 +154,9 @@ func formatStatement(toks []Token) string {
 		lines = []string{flatJoin(body)}
 	case "create table":
 		lines = layoutCreateTable(body)
+	case "create index", "create function", "create view", "create trigger",
+		"create statistics", "create sequence", "create procedure":
+		lines = layoutDDL(body)
 	case "select", "insert", "update", "delete", "with":
 		lines = formatQuerySegment(body, 0)
 	case "explain":
@@ -156,6 +183,177 @@ func formatStatement(toks []Token) string {
 		}
 	} else if tc := toks[len(toks)-1].TrailingComment; tc != nil {
 		out += commentMarker + trailingCommentText(tc)
+	}
+	return out
+}
+
+// ddlClauseWords are the keywords that introduce a continuation clause in
+// the DDL statements layoutDDL handles. Order matters only for the two-word
+// entries, which must precede any single-word entry sharing their first
+// word.
+var ddlClauseWords = []struct {
+	words []string
+	name  string
+}{
+	{[]string{"security", "definer"}, "security definer"},
+	{[]string{"security", "invoker"}, "security invoker"},
+	{[]string{"returns"}, "returns"},
+	{[]string{"language"}, "language"},
+	{[]string{"using"}, "using"},
+	{[]string{"include"}, "include"},
+	{[]string{"tablespace"}, "tablespace"},
+	{[]string{"where"}, "where"},
+	{[]string{"from"}, "from"},
+	{[]string{"on"}, "on"},
+	{[]string{"as"}, "as"},
+	{[]string{"immutable"}, "immutable"},
+	{[]string{"stable"}, "stable"},
+	{[]string{"volatile"}, "volatile"},
+	{[]string{"strict"}, "strict"},
+	{[]string{"parallel"}, "parallel"},
+	{[]string{"cost"}, "cost"},
+	{[]string{"execute"}, "execute"},
+	{[]string{"for"}, "for"},
+	{[]string{"before"}, "before"},
+	{[]string{"after"}, "after"},
+}
+
+// layoutDDL renders CREATE FUNCTION / INDEX / VIEW / TRIGGER / STATISTICS
+// and friends. Everything except CREATE TABLE used to fall through
+// formatStatement's default arm to flatJoin, which put the whole header on
+// one line -- a hand-written four-line CREATE FUNCTION header came back at
+// 138 columns, and 47 CREATE INDEX statements lost their line breaks.
+//
+// The shape is the one the rest of the tool uses: the object being created
+// stays on the first line, and each continuation clause goes on its own
+// line, right-padded so the clause keywords end at a common column -- a
+// river, computed over the continuation clauses only. The "create ..."
+// line is deliberately not part of that river: it carries the object name
+// and argument list and is routinely 40+ characters, which would push every
+// other line off the page.
+func layoutDDL(toks []Token) []string {
+	bounds := ddlClauseBounds(toks)
+	if len(bounds) == 0 {
+		return []string{flatJoin(toks)}
+	}
+	head := flatJoin(toks[:bounds[0].idx])
+	if len(head)+1+len(flatJoin(toks[bounds[0].idx:])) <= targetWidth {
+		return []string{flatJoin(toks)}
+	}
+
+	width := 0
+	for _, b := range bounds {
+		if len(b.name) > width {
+			width = len(b.name)
+		}
+	}
+
+	// Resolve each clause's body span first: hoistLanguage reorders the
+	// clauses, and a clause's span is defined by where the *next* one
+	// starts in the source, not in the output.
+	clauses := make([]ddlClause, 0, len(bounds))
+	for bi, b := range bounds {
+		end := len(toks)
+		if bi+1 < len(bounds) {
+			end = bounds[bi+1].idx
+		}
+		clauses = append(clauses, ddlClause{b.name, flatJoin(toks[b.idx+len(b.words) : end])})
+	}
+	clauses = hoistLanguage(clauses)
+
+	lines := []string{head}
+	for _, c := range clauses {
+		line := strings.Repeat(" ", width-len(c.name)) + c.name
+		if c.body != "" {
+			line += " " + c.body
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// ddlClause is one rendered continuation clause: its keyword and the text
+// that follows it.
+type ddlClause struct{ name, body string }
+
+// hoistLanguage moves a LANGUAGE clause that trails the body back into the
+// header, ahead of AS. PostgreSQL accepts a function's option list in any
+// order, so "as $$ ... $$ language plpgsql" is legal and common -- but it
+// buries the single most useful fact about a function, what language it is
+// written in, behind however many hundred lines its body runs to. Reading
+// the declaration should not require scrolling past the implementation.
+// Reordering options changes nothing about what the statement does.
+func hoistLanguage(clauses []ddlClause) []ddlClause {
+	asAt, langAt := -1, -1
+	for i, c := range clauses {
+		switch c.name {
+		case "as":
+			if asAt == -1 {
+				asAt = i
+			}
+		case "language":
+			langAt = i
+		}
+	}
+	if asAt == -1 || langAt == -1 || langAt < asAt {
+		return clauses
+	}
+	out := make([]ddlClause, 0, len(clauses))
+	out = append(out, clauses[:asAt]...)
+	out = append(out, clauses[langAt])
+	for i := asAt; i < len(clauses); i++ {
+		if i != langAt {
+			out = append(out, clauses[i])
+		}
+	}
+	return out
+}
+
+// matchDDLWords is matchWords without the TokKeyword requirement. Several
+// DDL clause introducers -- BEFORE, AFTER, EXECUTE, RETURNS, INCLUDE,
+// TABLESPACE -- are not in the lexer's keyword table and lex as plain
+// identifiers, but in this position they are unambiguously clause
+// keywords.
+func matchDDLWords(toks []Token, i int, words []string) bool {
+	for j, w := range words {
+		if i+j >= len(toks) || toks[i+j].Lower != w {
+			return false
+		}
+	}
+	return true
+}
+
+type ddlBound struct {
+	idx   int
+	name  string
+	words []string
+}
+
+// ddlClauseBounds finds each top-level DDL continuation clause. A clause
+// keyword inside parentheses (a column list, an argument list, an index
+// expression) belongs to that construct, not to the statement.
+func ddlClauseBounds(toks []Token) []ddlBound {
+	var out []ddlBound
+	depth := 0
+	for i := 0; i < len(toks); i++ {
+		switch toks[i].Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		for _, cw := range ddlClauseWords {
+			if matchDDLWords(toks, i, cw.words) {
+				out = append(out, ddlBound{idx: i, name: cw.name, words: cw.words})
+				i += len(cw.words) - 1
+				break
+			}
+		}
 	}
 	return out
 }

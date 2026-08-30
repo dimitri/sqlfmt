@@ -9,7 +9,10 @@ create table twcache.daily_counters
   de_favs bigint
 );
 
-create or replace function twcache.tg_update_daily_counters() returns trigger language plpgsql as $$
+create or replace function twcache.tg_update_daily_counters()
+ returns trigger
+language plpgsql
+      as $$
 declare
 begin
       update twcache.daily_counters
@@ -53,7 +56,11 @@ begin
 end;
 $$;
 
-create TRIGGER update_daily_counters AFTER insert on tweet.activity for EACH row EXECUTE PROCEDURE twcache.tg_update_daily_counters();
+create trigger update_daily_counters
+  after insert
+     on tweet.activity
+    for each row
+execute procedure twcache.tg_update_daily_counters();
 
 insert into tweet.activity(messageid, action)
      values (7, 'rt'),
