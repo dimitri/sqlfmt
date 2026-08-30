@@ -615,10 +615,21 @@ func layoutCase(toks []Token, caseCol int) []string {
 		return []string{flat}
 	}
 
-	// toks[0] == "case". Split remaining into when/then/else branches.
+	// toks[0] == "case". A *simple* CASE puts an operand expression between
+	// "case" and the first "when" ("case grouping(x) when 1 then ..."); a
+	// *searched* CASE goes straight to "when". Consume the operand, if
+	// there is one, onto the "case" line: without this the when-loop below
+	// -- which only advances while it is looking at a "when" -- never
+	// starts, i stays at 1, and every token from the operand up to "end"
+	// is silently dropped, rendering the whole expression as "case end".
 	whenCol := caseCol + len("case ")
-	lines := []string{"case"}
 	i := 1
+	head := "case"
+	if opEnd := caseOperandEnd(toks); opEnd > 1 {
+		head += " " + plainJoin(toks[1:opEnd])
+		i = opEnd
+	}
+	lines := []string{head}
 	for i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "when" {
 		condStart := i + 1
 		thenIdx := -1
@@ -676,6 +687,24 @@ func layoutCase(toks []Token, caseCol int) []string {
 	}
 	lines = append(lines, strings.Repeat(" ", caseCol)+"end")
 	return lines
+}
+
+// caseOperandEnd returns the index of the first top-level "when" in a CASE
+// token run, i.e. the end of a simple CASE's operand expression. It returns
+// 1 for a searched CASE ("case when ..."), where there is no operand.
+func caseOperandEnd(toks []Token) int {
+	depth := 0
+	for i := 1; i < len(toks); i++ {
+		switch {
+		case toks[i].Text == "(":
+			depth++
+		case toks[i].Text == ")":
+			depth--
+		case depth == 0 && toks[i].Kind == TokKeyword && toks[i].Lower == "when":
+			return i
+		}
+	}
+	return 1
 }
 
 // layoutOver wraps a long OVER(...) clause: PARTITION BY / ORDER BY / frame
