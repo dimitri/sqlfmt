@@ -116,6 +116,11 @@ format/
                          genuinely different formatting mode from the query
                          clauses — column-name-width alignment, not clause-keyword
                          alignment)
+                       - EXPLAIN (rule 19, in format.go's layoutExplain): a
+                         prefix line plus a recursive formatStatement call on
+                         the statement it wraps, so the wrapped query gets
+                         whichever layout it would have had on its own rather
+                         than a second EXPLAIN-specific code path
   comments.go      — rule 18: attachComments (a single pass over the full lexed
                      stream that removes every comment token and re-expresses it
                      as metadata -- Comments/TrailingComment -- on a neighboring

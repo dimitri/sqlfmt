@@ -317,6 +317,35 @@ fixture's current content.
     pretty-printer built on a parser that discards comments (see
     `DESIGN.md`).
 
+19. **EXPLAIN**: the `EXPLAIN` prefix — with its option list, if any — sits
+    alone on the first line, and the statement it wraps is formatted
+    exactly as it would be on its own, with its own clause river and no
+    extra indentation (185 of 192 corpus occurrences; 167 of those carry a
+    parenthesized option list):
+    ```sql
+    explain (analyze, buffers)
+    select res.raceid, res.driverid, res.points
+      from f1db.results res
+     where res.points >= 10;
+    ```
+    Because the wrapped statement keeps its own river, a long clause
+    keyword inside it still sets the alignment for the whole query, exactly
+    as if the `EXPLAIN` line were not there:
+    ```sql
+    explain (costs off, buffers, analyze)
+      select name, location, country
+        from circuits
+    order by position <-> point(2.349014, 48.864716);
+    ```
+    Unlike rule 4, a space *is* written between `explain` and its `(`: the
+    option list is not a function call. Both spellings of the prefix are
+    accepted — the parenthesized list above, and the legacy bare form the
+    grammar still allows (`explain analyze verbose select ...`), which is
+    preserved as written rather than rewritten into the parenthesized form,
+    per rule 1's "never change content, only whitespace". The wrapped
+    statement need not be a `SELECT`; `explain (analyze) execute p(1)` is
+    laid out the same way.
+
 ## Summary of genuinely ambiguous areas
 
 Be forgiving on these when validating/parsing input; pick the stated default

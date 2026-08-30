@@ -132,6 +132,8 @@ func formatStatement(toks []Token) string {
 		lines = layoutCreateTable(body)
 	case "select", "insert", "update", "delete", "with":
 		lines = formatQuerySegment(body, 0)
+	case "explain":
+		lines = layoutExplain(body)
 	default:
 		lines = []string{flatJoin(body)}
 	}
@@ -146,6 +148,68 @@ func formatStatement(toks []Token) string {
 		out += commentMarker + trailingCommentText(tc)
 	}
 	return out
+}
+
+// layoutExplain renders EXPLAIN per STYLE.md rule 19: the EXPLAIN prefix
+// (with its option list, if any) alone on the first line, then the
+// statement it wraps formatted exactly as if it had been written on its
+// own -- its own clause river, unindented. That is what the corpus does in
+// 185 of 192 cases.
+//
+// Both spellings of the prefix are handled: the modern parenthesized option
+// list ("explain (analyze, buffers) select ...") and the legacy bare form
+// the grammar still accepts ("explain analyze verbose select ..."). ANALYZE
+// and VERBOSE are the only two words the legacy form allows, so consuming
+// exactly those is precise rather than a guess about where the inner
+// statement starts.
+//
+// The wrapped statement is dispatched back through formatStatement, which
+// is what makes "explain (analyze) execute p(1)" and "explain select ..."
+// each come out formatted the way that statement would be on its own.
+func layoutExplain(toks []Token) []string {
+	prefix := []Token{toks[0]}
+	i := 1
+
+	if i < len(toks) && toks[i].Text == "(" {
+		depth := 0
+		for ; i < len(toks); i++ {
+			if toks[i].Text == "(" {
+				depth++
+			} else if toks[i].Text == ")" {
+				depth--
+				if depth == 0 {
+					prefix = append(prefix, toks[i])
+					i++
+					break
+				}
+			}
+			if depth > 0 {
+				prefix = append(prefix, toks[i])
+			}
+		}
+	} else {
+		for i < len(toks) && (toks[i].Lower == "analyze" || toks[i].Lower == "verbose") {
+			prefix = append(prefix, toks[i])
+			i++
+		}
+	}
+
+	// "explain" with nothing after it is not a statement we can improve on.
+	rest := trimTokens(toks[i:])
+	if len(rest) == 0 {
+		return []string{plainJoin(prefix)}
+	}
+
+	// plainJoin would render "explain(analyze)" -- spaceBetween treats "("
+	// after a name as a call, per STYLE.md rule 4. The option list is not a
+	// call, so the space goes in here.
+	head := prefix[0].Text
+	if len(prefix) > 1 {
+		head += " " + plainJoin(prefix[1:])
+	}
+
+	lines := []string{head}
+	return append(lines, strings.Split(formatStatement(rest), "\n")...)
 }
 
 // layoutCreateTable renders "create table name ( col ..., ... );" per
