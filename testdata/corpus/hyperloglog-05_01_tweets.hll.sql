@@ -1,7 +1,7 @@
 begin;
 
 with new_visitors as (
-       delete 
+       delete
          from tweet.visitor
         where id = any(
         select id
@@ -23,7 +23,7 @@ insert into tweet.uniques
      select messageid, date, visitors
        from new_visitor_groups
 on conflict (messageid, date) do
-     update 
+     update
         set visitors = hll_union(uniques.visitors, excluded.visitors)
       where uniques.messageid = excluded.messageid
         and uniques.date = excluded.date

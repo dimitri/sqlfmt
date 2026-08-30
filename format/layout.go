@@ -10,22 +10,29 @@ const targetWidth = 78
 var clauseWords = []struct {
 	words []string
 	name  string
+	// leadingOnly restricts the match to position 0 of the statement.
+	// EXPLAIN is only ever a statement prefix in PostgreSQL, so matching
+	// it anywhere else would split "select explain from t" -- a query
+	// against a column that happens to be named "explain" -- into two
+	// clauses.
+	leadingOnly bool
 }{
-	{[]string{"insert", "into"}, "insert into"},
-	{[]string{"on", "conflict"}, "on conflict"},
-	{[]string{"group", "by"}, "group by"},
-	{[]string{"order", "by"}, "order by"},
-	{[]string{"select"}, "select"},
-	{[]string{"from"}, "from"},
-	{[]string{"where"}, "where"},
-	{[]string{"having"}, "having"},
-	{[]string{"update"}, "update"},
-	{[]string{"set"}, "set"},
-	{[]string{"delete"}, "delete"},
-	{[]string{"returning"}, "returning"},
-	{[]string{"values"}, "values"},
-	{[]string{"limit"}, "limit"},
-	{[]string{"offset"}, "offset"},
+	{[]string{"explain"}, "explain", true},
+	{[]string{"insert", "into"}, "insert into", false},
+	{[]string{"on", "conflict"}, "on conflict", false},
+	{[]string{"group", "by"}, "group by", false},
+	{[]string{"order", "by"}, "order by", false},
+	{[]string{"select"}, "select", false},
+	{[]string{"from"}, "from", false},
+	{[]string{"where"}, "where", false},
+	{[]string{"having"}, "having", false},
+	{[]string{"update"}, "update", false},
+	{[]string{"set"}, "set", false},
+	{[]string{"delete"}, "delete", false},
+	{[]string{"returning"}, "returning", false},
+	{[]string{"values"}, "values", false},
+	{[]string{"limit"}, "limit", false},
+	{[]string{"offset"}, "offset", false},
 }
 
 type clauseSeg struct {
@@ -199,6 +206,9 @@ func splitClauses(toks []Token) []clauseSeg {
 			continue
 		}
 		for _, cw := range clauseWords {
+			if cw.leadingOnly && i != 0 {
+				continue
+			}
 			if matchWords(toks, i, cw.words) {
 				bounds = append(bounds, bound{idx: i, name: cw.name, kwEnd: i + len(cw.words)})
 				break
@@ -963,6 +973,12 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 func fitsInline(segs []clauseSeg, baseIndent, width int) bool {
 	total := 0
 	for _, s := range segs {
+		// STYLE.md rule 19: the EXPLAIN prefix keeps a line of its own even
+		// when everything would otherwise fit on one, so the statement being
+		// explained still reads as a statement rather than as an argument.
+		if s.name == "explain" {
+			return false
+		}
 		if s.name == "from" {
 			for _, t := range s.body {
 				if t.Kind == TokKeyword && t.Lower == "join" {
@@ -1026,6 +1042,9 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 	}
 
 	first := strings.Repeat(" ", kwCol) + kwText + " " + bodyLines[0]
+	// A clause with an empty body -- "explain" with no option list is the
+	// only one in practice -- would otherwise leave a trailing space.
+	first = strings.TrimRight(first, " ")
 	out := append(lead, first)
 	out = append(out, bodyLines[1:]...)
 	return out

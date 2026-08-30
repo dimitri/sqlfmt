@@ -67,6 +67,7 @@ var keywords = buildKeywordSet([]string{
 	"cast", "language", "function", "returns", "true", "false",
 	"lateral", "only", "of", "to", "for",
 	"conflict", "do", "nothing", "constraint", "foreign", "materialized",
+	"explain",
 })
 
 func buildKeywordSet(words []string) map[string]bool {

@@ -317,6 +317,46 @@ fixture's current content.
     pretty-printer built on a parser that discards comments (see
     `DESIGN.md`).
 
+19. **EXPLAIN**: `EXPLAIN` is a clause keyword, not a prefix bolted on above
+    the statement. It takes a line of its own — with its option list, if
+    any — and is right-padded into the same river as the clauses of the
+    statement it wraps, exactly like `select` or `order by`:
+    ```sql
+    explain (analyze, buffers)
+     select res.raceid, res.driverid, res.points
+       from f1db.results res
+      where res.points >= 10;
+    ```
+    `explain` is 7 characters, so it sets the river above. When the wrapped
+    statement has a wider clause keyword, that one sets the river and the
+    `EXPLAIN` line indents under it like any other short keyword would:
+    ```sql
+     explain (costs off, buffers, analyze)
+      select name, location, country
+        from circuits
+    order by position <-> point(2.349014, 48.864716);
+    ```
+    A JOIN phrase wide enough to set the river (per rule 9) moves it too.
+    The option list is the clause's body, so its length never affects the
+    river — only the word `explain` does.
+
+    The `EXPLAIN` line always breaks, even where the whole statement would
+    otherwise fit inline per rule 17: what is being explained should read as
+    a statement, not as an argument.
+
+    Unlike rule 4, a space *is* written between `explain` and its `(` — the
+    option list is not a function call. Both spellings of the prefix are
+    accepted: the parenthesized list above, and the legacy bare form the
+    grammar still allows (`explain analyze verbose select ...`), which is
+    preserved as written rather than rewritten into the parenthesized form,
+    per rule 1. Those extra words are body, so they do not widen the river
+    either.
+
+    Two payloads have no single top-level river to join — `EXECUTE`, and
+    anything starting with `WITH` (whose CTE list has a layout of its own,
+    rule 13). Those keep an unpadded `EXPLAIN` line followed by the
+    statement formatted as it would be on its own.
+
 ## Summary of genuinely ambiguous areas
 
 Be forgiving on these when validating/parsing input; pick the stated default
