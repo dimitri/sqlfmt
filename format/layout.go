@@ -868,6 +868,21 @@ func layoutCommaList(toks []Token, startCol int) []string {
 // trailing comment -- used to force a multi-line layout even when a
 // flattened single-line render would otherwise fit, since that fast path
 // has nowhere to put a comment.
+// hoistSegmentComments strips every attached comment off toks (in place)
+// and returns them rendered as their own lines at indent. Used where a
+// caller is about to flatten a token run to a single line and would
+// otherwise inline them.
+func hoistSegmentComments(toks []Token, indent int) []string {
+	var out []string
+	for i := range toks {
+		if len(toks[i].Comments) > 0 {
+			out = append(out, renderLeadingComments(toks[i].Comments, indent)...)
+			toks[i].Comments = nil
+		}
+	}
+	return out
+}
+
 func anyTokenComments(toks []Token) bool {
 	for _, t := range toks {
 		if len(t.Comments) > 0 || t.TrailingComment != nil {
@@ -1234,6 +1249,15 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		out = append(out, leadingCommentLines(seg, joinCol)...)
 		segTrailing := trailingCommentSuffix(seg)
 		kEnd := joinKeywordEnd(seg)
+		// A comment attached to a token inside this segment -- a block
+		// comment above the joined relation, say -- makes renderRun emit
+		// several lines, and flatJoin below would glue them back into one
+		// with the comment inlined, running to 200+ columns. Hoist those
+		// comments out onto their own lines first, at the join column,
+		// which is where a reader expects a comment about this join.
+		if anyTokenComments(seg[kEnd:]) {
+			out = append(out, hoistSegmentComments(seg[kEnd:], joinCol)...)
+		}
 		phrase := flatJoin(seg[:kEnd])
 		rest := seg[kEnd:]
 

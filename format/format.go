@@ -260,6 +260,7 @@ func layoutDDL(toks []Token) []string {
 		clauses = append(clauses, ddlClause{b.name, flatJoin(toks[b.idx+len(b.words) : end])})
 	}
 	clauses = hoistLanguage(clauses)
+	clauses = formatSQLBody(clauses)
 
 	lines := []string{head}
 	for _, c := range clauses {
@@ -270,6 +271,63 @@ func layoutDDL(toks []Token) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// formatSQLBody reformats a LANGUAGE SQL function body. The body of such a
+// function is SQL, and this package formats SQL, so there is no reason to
+// leave it as whatever the author typed while every other statement in the
+// file gets laid out.
+//
+// Only "language sql" is touched. Every other language -- plpgsql, plpython,
+// plperl -- is passed through verbatim, which is both the existing behaviour
+// and the only safe one: the lexer treats a dollar-quoted body as a single
+// opaque token, so a body it does not understand is preserved exactly.
+func formatSQLBody(clauses []ddlClause) []ddlClause {
+	lang := ""
+	for _, c := range clauses {
+		if c.name == "language" {
+			lang = strings.ToLower(strings.TrimSpace(c.body))
+		}
+	}
+	if lang != "sql" {
+		return clauses
+	}
+	out := make([]ddlClause, len(clauses))
+	copy(out, clauses)
+	for i, c := range out {
+		if c.name != "as" {
+			continue
+		}
+		tag, inner, ok := splitDollarQuote(c.body)
+		if !ok {
+			continue
+		}
+		formatted, err := Format(strings.NewReader(inner))
+		if err != nil {
+			continue // unparseable body: leave it exactly as written
+		}
+		out[i].body = tag + "\n" + strings.TrimRight(formatted, "\n") + "\n" + tag
+	}
+	return out
+}
+
+// splitDollarQuote splits "$tag$body$tag$" into its tag and body. It
+// reports false for anything that is not a single, complete dollar-quoted
+// string -- a body with trailing options after it, say.
+func splitDollarQuote(s string) (tag, inner string, ok bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "$") {
+		return "", "", false
+	}
+	end := strings.Index(s[1:], "$")
+	if end < 0 {
+		return "", "", false
+	}
+	tag = s[:end+2]
+	if !strings.HasSuffix(s, tag) || len(s) < 2*len(tag) {
+		return "", "", false
+	}
+	return tag, s[len(tag) : len(s)-len(tag)], true
 }
 
 // ddlClause is one rendered continuation clause: its keyword and the text
