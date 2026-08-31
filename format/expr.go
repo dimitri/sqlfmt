@@ -127,11 +127,9 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 	// keeps its contents near the margin instead of compounding the
 	// indent -- so if the suffix has to break in turn, it still has room.
 	if head, suffix, ok := splitTrailingAggSuffix(toks); ok {
-		return group(concat(
-			exprAtomDoc(head, levels),
-			line(),
-			text(plainJoin(suffix)),
-		))
+		return defer_(plainJoin(toks), func(col int) []string {
+			return aggSuffixLines(head, suffix, col)
+		})
 	}
 	if head, over, ok := splitTrailingOver(toks); ok {
 		return concat(
@@ -229,6 +227,41 @@ func clauseParen(toks []Token, i int) bool {
 		return i > 1 && toks[i-2].Kind == TokKeyword && toks[i-2].Lower == "within"
 	}
 	return false
+}
+
+// aggSuffixLines lays an aggregate out above its FILTER / WITHIN GROUP
+// suffix, with the two names right-aligned so their argument lists start
+// at the same column -- the river the rest of the tool uses, applied to a
+// two-line construct:
+//
+//	 count(*)                                percentile_cont(array[0.5, 0.99])
+//	filter(where x is null) as dnfs             within group (order by d)
+//
+// "count" is pushed one column right to end where "filter" ends; where
+// the function name is the longer of the two it stays put and the suffix
+// keyword moves instead.
+func aggSuffixLines(head, suffix []Token, col int) []string {
+	name := plainJoin(head[:openParenAt(head)])
+	kw := plainJoin(suffix[:openParenAt(suffix)])
+	river := cols(name)
+	if w := cols(kw); w > river {
+		river = w
+	}
+	return []string{
+		strings.Repeat(" ", river-cols(name)) + plainJoin(head),
+		strings.Repeat(" ", col+river-cols(kw)) + plainJoin(suffix),
+	}
+}
+
+// openParenAt returns the index of the first top-level "(" in toks, or
+// len(toks) when there is none.
+func openParenAt(toks []Token) int {
+	for i, t := range toks {
+		if t.Text == "(" {
+			return i
+		}
+	}
+	return len(toks)
 }
 
 // splitTrailingAggSuffix cuts a run that ends in an aggregate's FILTER or

@@ -147,34 +147,38 @@ func TestTypedTableKeepsItsColumnList(t *testing.T) {
 	}
 }
 
-// An aggregate's FILTER / WITHIN GROUP suffix starts at the same column as
-// the aggregate it qualifies, not under the "(" of the aggregate's own
-// arguments -- it continues one expression at one level rather than
-// nesting inside the call, which leaves its contents room to break.
-func TestAggregateSuffixStartsAtTheAggregateColumn(t *testing.T) {
+// An aggregate and its FILTER / WITHIN GROUP suffix are right-aligned
+// with each other, so their argument lists start at the same column:
+// "count" is pushed one column right to end where "filter" ends, and
+// where the function name is the longer of the two the suffix keyword
+// moves instead.
+func TestAggregateSuffixIsRiverAligned(t *testing.T) {
 	src := "select season, count(*) filter(where milliseconds is null and position is null) as dnfs," +
 		" percentile_cont(array[0.5, 0.9, 0.95, 0.99]) within group (order by cts - ats) as parr from r;\n"
 	got := mustFormat(t, src)
 	lines := strings.Split(got, "\n")
+	checked := 0
 	for i, l := range lines {
-		t := strings.TrimLeft(l, " ")
-		if !strings.HasPrefix(t, "filter(") && !strings.HasPrefix(t, "within group ") {
+		body := strings.TrimLeft(l, " ")
+		var kw string
+		switch {
+		case strings.HasPrefix(body, "filter("):
+			kw = "filter"
+		case strings.HasPrefix(body, "within group "):
+			kw = "within group"
+		default:
 			continue
 		}
-		suffixCol := len(l) - len(t)
-		aggCol := len(lines[i-1]) - len(strings.TrimLeft(lines[i-1], " "))
-		if suffixCol != aggCol {
-			return // reported below
+		checked++
+		aggEnd := strings.Index(lines[i-1], "(")
+		kwEnd := len(l) - len(body) + len(kw)
+		if aggEnd != kwEnd {
+			t.Errorf("%q ends at %d, its aggregate name at %d -- not aligned:\n%s",
+				kw, kwEnd, aggEnd, got)
 		}
 	}
-	for i, l := range lines {
-		tl := strings.TrimLeft(l, " ")
-		if !strings.HasPrefix(tl, "filter(") && !strings.HasPrefix(tl, "within group ") {
-			continue
-		}
-		if got, want := len(l)-len(tl), len(lines[i-1])-len(strings.TrimLeft(lines[i-1], " ")); got != want {
-			t.Errorf("suffix at column %d, aggregate at %d:\n%s", got, want, strings.Join(lines, "\n"))
-		}
+	if checked != 2 {
+		t.Fatalf("expected both suffixes on their own line, saw %d:\n%s", checked, got)
 	}
 	// OVER keeps its own layout: a frame's clauses each need a line.
 	over := mustFormat(t, "select avg(res.points) over(order by r.round rows between 2 preceding and current row)::numeric as x from t;\n")
