@@ -34,7 +34,10 @@ win as (
   select st_makeenvelope(x0, y0, x1, y1, 4326) as env from bbox
 ),
 roads as (
-    select st_transscale(st_intersection(r.geom, win.env), -proj.x0, -proj.y0, proj.scale, proj.scale) as geom
+    select st_transscale(
+             st_intersection(r.geom, win.env), -proj.x0, -proj.y0, proj.scale,
+             proj.scale
+           ) as geom
       from osm_london.roads r, win, proj
      where st_intersects(r.geom, win.env)
 ),
@@ -54,9 +57,18 @@ layers as (
       from search, proj
     union all
     select 3,
-           '<circle cx="' || (((pos)[0] - proj.x0) * proj.scale)::text || '" cy="' || (-(((pos)[1] - proj.y0) * proj.scale))::text || '" r="6" fill="#5B8DB8" stroke="#F2EFE9" stroke-width="1.5"/>' || '<text x="' || (((pos)[0] - proj.x0) * proj.scale + 9)::text || '" y="' || (
-    -(((pos)[1] - proj.y0) * proj.scale) + (
-    case when rn % 2 = 0 then 9 else -4 end))::text || '" font-size="13" fill="#2C2820">' || replace(replace(name, '&', '&amp;'), '<', '&lt;') || '</text>' as elem
+           '<circle cx="'
+           || (((pos)[0] - proj.x0) * proj.scale)::text
+           || '" cy="'
+           || (-(((pos)[1] - proj.y0) * proj.scale))::text
+           || '" r="6" fill="#5B8DB8" stroke="#F2EFE9" stroke-width="1.5"/>'
+           || '<text x="'
+           || (((pos)[0] - proj.x0) * proj.scale + 9)::text
+           || '" y="'
+           || (-(((pos)[1] - proj.y0) * proj.scale) + (case when rn % 2 = 0 then 9 else -4 end))::text
+           || '" font-size="13" fill="#2C2820">'
+           || replace(replace(name, '&', '&amp;'), '<', '&lt;')
+           || '</text>' as elem
       from nearest, proj
 )
   select '<svg viewBox="0 '

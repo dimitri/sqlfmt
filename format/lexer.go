@@ -214,6 +214,16 @@ func (l *lexer) scanToken() (Token, error) {
 	switch {
 	case b == '\'':
 		return l.scanString()
+	case isStringPrefix(b) && l.peekAt(1) == '\'':
+		// E'...', B'...', X'...' and U&'...': the prefix is part of the
+		// literal and must stay glued to the opening quote. Lexed as a
+		// bare identifier followed by a string, spaceBetween put a space
+		// between them -- and "E '\n'" is not valid PostgreSQL at all
+		// ("type \"e\" does not exist"), so the formatter was emitting SQL
+		// that does not parse.
+		return l.scanPrefixedString()
+	case (b == 'u' || b == 'U') && l.peekAt(1) == '&' && l.peekAt(2) == '\'':
+		return l.scanPrefixedString()
 	case b == '"':
 		return l.scanQuotedIdent()
 	case b == '$':
@@ -253,6 +263,31 @@ func isPunct(b byte) bool {
 		return true
 	}
 	return false
+}
+
+// isStringPrefix reports whether b introduces a prefixed string literal.
+func isStringPrefix(b byte) bool {
+	switch b {
+	case 'e', 'E', 'b', 'B', 'x', 'X':
+		return true
+	}
+	return false
+}
+
+// scanPrefixedString scans E'...', B'...', X'...' or U&'...' as one token,
+// prefix included.
+func (l *lexer) scanPrefixedString() (Token, error) {
+	start := l.pos
+	l.advance() // the prefix letter
+	if l.peekByte() == '&' {
+		l.advance()
+	}
+	str, err := l.scanString()
+	if err != nil {
+		return Token{}, err
+	}
+	text := string(l.src[start:l.pos])
+	return Token{Kind: str.Kind, Text: text, Lower: text}, nil
 }
 
 func (l *lexer) scanString() (Token, error) {

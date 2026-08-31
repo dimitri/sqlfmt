@@ -468,10 +468,22 @@ func layoutConcatChain(toks []Token, startCol int) ([]string, bool) {
 }
 
 // splitTopLevelConcat splits a token run at its top-level "||" operators.
+//
+// CASE spans are skipped whole. A "||" inside a CASE branch --
+// "else substring(name from 1 for 54) || '...' end" -- is not a top-level
+// operator, and splitting there cut the CASE in half: each half then looked
+// like its own CASE to the layout below, and the "end" came out twice.
 func splitTopLevelConcat(toks []Token) [][]Token {
 	var out [][]Token
 	depth, start := 0, 0
-	for i, t := range toks {
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if t.Kind == TokKeyword && t.Lower == "case" {
+			if end := matchCaseEnd(toks, i); end > i {
+				i = end
+				continue
+			}
+		}
 		switch t.Text {
 		case "(":
 			depth++
@@ -1132,14 +1144,24 @@ func layoutCommaList(toks []Token, startCol int) []string {
 		lead := leadingCommentLines(it, startCol)
 		trailing := trailingCommentSuffix(it)
 		itLines := renderRun(it, startCol)
-		// A single select-list item can be far too wide with no comma in
-		// it to break at -- the figure-generating queries build TikZ as one
-		// long "format(...) || E'\n' || format(...)" chain. The "||"
-		// operators are the natural break, and are where the author breaks
-		// them by hand.
-		if len(itLines) == 1 && startCol+len(itLines[0]) > targetWidth {
-			if cl, ok := layoutConcatChain(it, startCol); ok {
-				itLines = cl
+		// A single list item can be far too wide with no comma in it to
+		// break at -- the figure-generating queries build TikZ as one long
+		// "format(...) || E'\n' || format(...)" chain, and a row
+		// comparison puts two wide lists either side of an operator. Those
+		// break points interact, so the choice is made by the Doc layer
+		// (see doc.go), which decides a whole group at a time rather than
+		// greedily where it stands.
+		// Gate on the item's own flat width, not on whether renderRun
+		// happened to break it: renderRun breaks greedily at the first
+		// paren that does not fit, which would pre-empt the Doc layer on
+		// exactly the items it exists for.
+		if startCol+len(plainJoin(trimTokens(it))) > targetWidth {
+			if el, ok := exprLines(it, startCol); ok {
+				itLines = el
+			} else if len(itLines) == 1 {
+				if cl, ok := layoutConcatChain(it, startCol); ok {
+					itLines = cl
+				}
 			}
 		}
 		if idx < len(items)-1 {

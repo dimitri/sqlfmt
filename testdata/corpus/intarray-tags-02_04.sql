@@ -5,16 +5,10 @@ with t(query) as (
         or tag = 'rhythm and blues'
 )
   select track.tid,
-         left(track.artist, 26) || case
-                                        when length(track.artist) > 26
-                                        then '…'
-                                        else ''
-                                   end as artist,
-         left(track.title, 26) || case
-                                       when length(track.title) > 26
-                                       then '…'
-                                       else ''
-                                  end as title
+         left(track.artist, 26)
+         || case when length(track.artist) > 26 then '…' else '' end as artist,
+         left(track.title, 26)
+         || case when length(track.title) > 26 then '…' else '' end as title
     from track_tags tt
     join tids on tt.tid = tids.rowid
     join t on tt.tags @@ t.query

@@ -136,13 +136,34 @@ func TestFillKeepsListsCompact(t *testing.T) {
 	}
 }
 
-// TestFunctionCallArgsNotWrapped: rule 4's no-space-before-"(" marks a
-// function call, and the corpus keeps long calls on one line -- breaking
-// their arguments reads worse than the overflow.
-func TestFunctionCallArgsNotWrapped(t *testing.T) {
+// TestFunctionCallArgsFillWhenTooWide: a call that overflows the target has
+// its arguments filled -- packed onto as few lines as fit, not exploded one
+// per line. Three greedy attempts at this each improved some files and
+// regressed others; the Doc layer decides the whole group at once instead.
+func TestFunctionCallArgsFillWhenTooWide(t *testing.T) {
 	got := ddlFmt(t, "select st_transscale(st_intersection(r.geom, win.env), -proj.x0, -proj.y0, proj.scale, proj.scale) as geom from r;")
-	if strings.Contains(got, "st_transscale(\n") {
-		t.Errorf("function call arguments were wrapped:\n%s", got)
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 80 {
+			t.Errorf("line over the target:\n%s", got)
+		}
+	}
+	// Filled, not one per line: at least one line carries several args.
+	packed := false
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Count(l, ",") >= 2 {
+			packed = true
+		}
+	}
+	if !packed {
+		t.Errorf("arguments were exploded one per line rather than filled:\n%s", got)
+	}
+}
+
+// TestShortCallStaysInline: a call that fits is untouched.
+func TestShortCallStaysInline(t *testing.T) {
+	got := ddlFmt(t, "select coalesce(a, b, c) as x from t;")
+	if strings.Contains(got, "coalesce(\n") {
+		t.Errorf("short call was wrapped:\n%s", got)
 	}
 }
 
