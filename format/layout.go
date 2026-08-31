@@ -420,6 +420,51 @@ func isUnaryContext(prevPrev *Token) bool {
 // It reports ok=false when filling cannot help: if col is already so deep
 // that even a single item overflows, breaking the list only adds ragged
 // lines to an over-long one, and the caller should leave it alone.
+// layoutInsertTarget renders "insert into t (col, col, ...)". The column
+// list is not a function call's argument list, but it looks exactly like
+// one -- it follows an identifier directly -- so renderRun's paren handling
+// declines to break it, per rule 4, and a wide list ran off the page. Only
+// the clause knows better, so the fill happens here.
+//
+// ok is false when there is no column list, or when it already fits.
+func layoutInsertTarget(body []Token, bodyCol int) ([]string, bool) {
+	body = trimTokens(body)
+	if len(body) < 3 || body[len(body)-1].Text != ")" {
+		return nil, false
+	}
+	open := -1
+	depth := 0
+	for i := len(body) - 1; i >= 0; i-- {
+		switch body[i].Text {
+		case ")":
+			depth++
+		case "(":
+			depth--
+			if depth == 0 {
+				open = i
+			}
+		}
+		if open >= 0 {
+			break
+		}
+	}
+	if open <= 0 {
+		return nil, false
+	}
+	head := plainJoin(body[:open])
+	flat := head + plainJoin(body[open:])
+	if bodyCol+len(flat) <= targetWidth {
+		return nil, false
+	}
+	filled, ok := fillCommaList(body[open+1:len(body)-1], bodyCol+len(head)+1)
+	if !ok {
+		return nil, false
+	}
+	filled[0] = head + "(" + filled[0]
+	filled[len(filled)-1] += ")"
+	return filled, true
+}
+
 // layoutRowAssignment renders the multiple-column form of UPDATE ... SET,
 // "set (a, b, ...) = (x, y, ...)", when it does not fit on one line. Both
 // sides are parenthesized lists that routinely run to a couple of hundred
@@ -1369,6 +1414,12 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 		bodyLines = layoutPredicateList(body, baseIndent+width)
 	case "from":
 		bodyLines = layoutFrom(body, baseIndent, width)
+	case "insert into":
+		if l, ok := layoutInsertTarget(body, bodyCol); ok {
+			bodyLines = l
+		} else {
+			bodyLines = renderRun(body, bodyCol)
+		}
 	case "set":
 		switch {
 		case len(splitTopLevelComma(trimTokens(body))) > 1:

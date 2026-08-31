@@ -244,3 +244,39 @@ func TestTrailingLanguageStillFound(t *testing.T) {
 		t.Errorf("trailing LANGUAGE not hoisted:\n%s", got)
 	}
 }
+
+// TestInsertColumnListFills: an INSERT column list is not a function call's
+// argument list, but it looks exactly like one -- it follows an identifier
+// directly -- so renderRun's paren handling declined to break it per rule 4
+// and a wide list ran off the page. Only the clause knows better.
+func TestInsertColumnListFills(t *testing.T) {
+	src := "insert into twcache.daily_counters (day, rts, de_rts, favs, de_favs, mentions, replies, quotes) values (1,2,3,4,5,6,7,8);"
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+	if !strings.Contains(got, "de_favs, mentions,\n") && !strings.Contains(got, "mentions,\n") {
+		t.Errorf("column list did not fill across lines:\n%s", got)
+	}
+}
+
+// TestShortInsertUnchanged: the break is width-driven.
+func TestShortInsertUnchanged(t *testing.T) {
+	got := ddlFmt(t, "insert into t (a, b) values (1, 2);")
+	if strings.Count(strings.TrimRight(got, "\n"), "\n") > 1 {
+		t.Errorf("short INSERT should not be broken up:\n%s", got)
+	}
+}
+
+// TestInsertWithoutColumnList: nothing to fill, and no crash looking.
+func TestInsertWithoutColumnList(t *testing.T) {
+	got := ddlFmt(t, "insert into t select a, b from u;")
+	if squash(got) != squash("insert into t select a, b from u;") {
+		t.Errorf("content changed:\n%s", got)
+	}
+}
