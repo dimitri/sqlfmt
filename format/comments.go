@@ -143,6 +143,24 @@ func formatLineComment(c Token, indent int) []string {
 // formatter on its own output is a no-op.
 func formatBlockComment(c Token, indent int) []string {
 	inner := strings.TrimSuffix(strings.TrimPrefix(c.Text, "/*"), "*/")
+	// A comment whose body carries its own "/*" or "*/" is a nested
+	// comment (PostgreSQL nests them), and reflowing it as prose rewrites
+	// those markers -- stripping a leading "*", re-wrapping a line so a
+	// "*/" splits across the break -- which changes where the comment ends
+	// and pulls the SQL after it inside. Its exact bytes are the only
+	// rendering that is guaranteed to still mean the same thing.
+	if strings.Contains(inner, "/*") || strings.Contains(inner, "*/") {
+		pad := strings.Repeat(" ", indent)
+		var out []string
+		for i, l := range strings.Split(c.Text, "\n") {
+			if i == 0 {
+				out = append(out, pad+l)
+				continue
+			}
+			out = append(out, l)
+		}
+		return out
+	}
 	out := []string{strings.Repeat(" ", indent) + "/*"}
 
 	var para []string

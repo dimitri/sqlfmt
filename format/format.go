@@ -151,12 +151,23 @@ func formatStatement(toks []Token) string {
 	var lines []string
 	switch kw {
 	case "begin", "commit", "rollback":
-		lines = []string{flatJoin(body)}
+		lines = flatStatementLines(body)
 	case "create table":
 		lines = layoutCreateTable(body)
 	case "create index", "create function", "create view", "create trigger",
 		"create statistics", "create sequence", "create procedure":
-		lines = layoutDDL(body)
+		// layoutDDL assembles its clause words with flatJoin and has no
+		// place to put a "--" comment, so it dropped them; renderRun
+		// always breaks the line after one. That trade is only worth
+		// making for DDL whose payload is not itself a query -- a CREATE
+		// VIEW's body goes back through the query layout, which handles
+		// comments properly, and handing the whole statement to renderRun
+		// instead flattens a carefully rivered view into one long line.
+		if hasLineComment(body) && !ddlBodyIsQuery(body) {
+			lines = renderRun(body, 0)
+		} else {
+			lines = layoutDDL(body)
+		}
 	case "select", "insert", "update", "delete", "with":
 		lines = formatQuerySegment(body, 0)
 	case "explain":
@@ -171,10 +182,10 @@ func formatStatement(toks []Token) string {
 		if len(body) > 0 && body[0].Text == "(" {
 			lines = formatQuerySegment(body, 0)
 		} else {
-			lines = []string{flatJoin(body)}
+			lines = flatStatementLines(body)
 		}
 	default:
-		lines = []string{flatJoin(body)}
+		lines = flatStatementLines(body)
 	}
 
 	out := strings.Join(lines, "\n")
@@ -187,6 +198,17 @@ func formatStatement(toks []Token) string {
 		out += commentMarker + trailingCommentText(tc)
 	}
 	return out
+}
+
+// flatStatementLines renders a statement the layout has no clause
+// structure for. That is normally one flat line, but a "--" comment in the
+// middle of the run cannot share a line with the tokens after it, so the
+// run keeps the line breaks renderRun put in for it.
+func flatStatementLines(body []Token) []string {
+	if hasLineComment(body) {
+		return renderRun(body, 0)
+	}
+	return []string{flatJoin(body)}
 }
 
 // ddlClauseWords are the keywords that introduce a continuation clause in
@@ -470,6 +492,24 @@ func hoistLanguage(clauses []ddlClause) []ddlClause {
 
 // isQueryStart reports whether toks begins a query -- the payload of a
 // CREATE VIEW or a CREATE TABLE ... AS.
+// ddlBodyIsQuery reports whether a DDL statement carries a query as its
+// payload -- "create view v as select ...", "create table t as with ...".
+func ddlBodyIsQuery(toks []Token) bool {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth == 0 && t.Kind == TokKeyword && t.Lower == "as" && isQueryStart(toks[i+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
 func isQueryStart(toks []Token) bool {
 	if len(toks) == 0 || toks[0].Kind != TokKeyword {
 		return false
@@ -685,10 +725,10 @@ func layoutCreateTable(toks []Token) []string {
 	open := createTableColumnList(toks)
 	if open == -1 {
 		if body := createTableAsBody(toks); body != -1 {
-			head := flatJoin(toks[:body])
-			return append([]string{head}, strings.Split(formatStatement(toks[body:]), "\n")...)
+			head := flatStatementLines(toks[:body])
+			return append(head, strings.Split(formatStatement(toks[body:]), "\n")...)
 		}
-		return []string{flatJoin(toks)}
+		return flatStatementLines(toks)
 	}
 	header := flatJoin(toks[:open])
 	close := matchParen(toks, open)
@@ -722,18 +762,26 @@ func layoutCreateTable(toks []Token) []string {
 		if idx == len(items)-1 {
 			comma = ""
 		}
+		// Peeled before flatJoin/renderRun, both of which consume the
+		// metadata: the comma separating two columns is part of the
+		// statement and has to be emitted before the comment, not after
+		// it. Appending it to renderRun's output put the comma inside the
+		// comment -- "bigserial primary key -- the key," -- which is a
+		// syntax error, and left renderRun's post-comment line break
+		// behind as a stray blank line.
+		trailing := trailingCommentSuffix(it)
 		if isConstraint(it) {
 			if prevWasColumn {
 				lines = append(lines, "")
 			}
-			lines = append(lines, "  "+flatJoin(it)+comma)
+			lines = append(lines, "  "+flatJoin(it)+comma+trailing)
 			prevWasColumn = false
 			continue
 		}
 		name := it[0].Text
 		rest := renderRun(trimTokens(it[1:]), 2+maxName+1)
 		pad := strings.Repeat(" ", maxName-len(name))
-		lines = append(lines, "  "+name+pad+" "+rest[0]+comma)
+		lines = append(lines, "  "+name+pad+" "+rest[0]+comma+trailing)
 		lines = append(lines, rest[1:]...)
 		prevWasColumn = true
 	}

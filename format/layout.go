@@ -179,6 +179,16 @@ func splitTopLevelComma(toks []Token) [][]Token {
 		} else if t.Text == ")" {
 			depth--
 		} else if depth == 0 && t.Text == "," {
+			// The comma is dropped here -- it is a separator, not part of
+			// either item -- so a comment trailing on it would vanish with
+			// it. Carry it back onto the item it follows, which is where
+			// the author put it and where the layout can still render it.
+			if tc := toks[i].TrailingComment; tc != nil && i > start {
+				if last := &toks[i-1]; last.TrailingComment == nil {
+					last.TrailingComment = tc
+					toks[i].TrailingComment = nil
+				}
+			}
 			segs = append(segs, toks[start:i])
 			start = i + 1
 		}
@@ -716,6 +726,21 @@ func renderRun(toks []Token, col int) []string {
 
 	var prev, prevPrev *Token
 	i := 0
+	// A "--" comment on the last token of a span the loop skips over -- a
+	// CASE, an OVER(...), a parenthesized group -- is never seen by the
+	// per-token safety net below, which only runs on the plain path. Left
+	// alone it is dropped outright, which is data loss; written without a
+	// break it would swallow whatever follows it on the line.
+	flushTrailing := func(j int) {
+		if toks[j].TrailingComment == nil {
+			return
+		}
+		write(commentMarker + trailingCommentText(toks[j].TrailingComment))
+		toks[j].TrailingComment = nil
+		lines = append(lines, "")
+		curCol = 0
+	}
+
 	for i < len(toks) {
 		t := toks[i]
 		if isNonLayout(t) {
@@ -760,6 +785,7 @@ func renderRun(toks []Token, col int) []string {
 			}
 			merge(layoutCase(toks[i:end+1], curCol))
 			prevPrev, prev = prev, &toks[end]
+			flushTrailing(end)
 			i = end + 1
 			continue
 		}
@@ -777,6 +803,7 @@ func renderRun(toks []Token, col int) []string {
 				merge(layoutOver(overToks, curCol))
 			}
 			prevPrev, prev = prev, &toks[close]
+			flushTrailing(close)
 			i = close + 1
 			continue
 		}
@@ -833,6 +860,7 @@ func renderRun(toks []Token, col int) []string {
 						merge(filled)
 						write(")")
 						prevPrev, prev = prev, &toks[close]
+						flushTrailing(close)
 						i = close + 1
 						continue
 					}
@@ -852,6 +880,7 @@ func renderRun(toks []Token, col int) []string {
 				}
 			}
 			prevPrev, prev = prev, &toks[close]
+			flushTrailing(close)
 			i = close + 1
 			continue
 		}
@@ -1128,7 +1157,7 @@ func layoutCommaList(toks []Token, startCol int) []string {
 	// flatJoin's underlying renderRun call consumes/clears any comment
 	// metadata on these tokens as a side effect, which the multi-line path
 	// below still needs intact if this fast path doesn't end up taking it.
-	if len(items) > 0 && !anyItemComments(items) {
+	if len(items) > 0 && !anyItemComments(items) && !hasLineComment(toks) {
 		if flat := flatJoin(trimTokens(toks)); startCol+len(flat) <= targetWidth {
 			return []string{flat}
 		}
@@ -1216,6 +1245,31 @@ func anyTokenComments(toks []Token) bool {
 // carries a leading or trailing comment -- used to force the multi-line
 // layout even when the flattened form would otherwise fit inline, since the
 // single-line fast path has nowhere to put a comment.
+// hasLineComment reports whether any token in the run carries a "--"
+// comment, in a leading or a trailing position.
+//
+// Such a run has no valid one-line rendering: everything placed after the
+// comment on that line ends up inside it. renderRun already breaks the
+// line for exactly this reason, but flatJoin joins its lines back with a
+// space, which undoes the protection -- so a flat path has to be refused
+// before it is taken rather than repaired after. anyItemComments is not
+// enough on its own: it looks only at each item's first and last token, so
+// a comment on a separating comma, which belongs to no item at all, was
+// invisible to it.
+func hasLineComment(toks []Token) bool {
+	for i := range toks {
+		if tc := toks[i].TrailingComment; tc != nil && tc.Kind == TokLineComment {
+			return true
+		}
+		for _, c := range toks[i].Comments {
+			if c.Kind == TokLineComment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func anyItemComments(items [][]Token) bool {
 	for _, it := range items {
 		it = trimTokens(it)

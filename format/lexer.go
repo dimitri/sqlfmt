@@ -253,10 +253,25 @@ func (l *lexer) scanToken() (Token, error) {
 	}
 }
 
-func isDigit(b byte) bool      { return b >= '0' && b <= '9' }
-func isAlpha(b byte) bool      { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' }
-func isIdentStart(b byte) bool { return isAlpha(b) }
-func isIdentCont(b byte) bool  { return isAlpha(b) || isDigit(b) || b == '$' }
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
+func isAlpha(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' }
+
+// isHigh reports whether b has its high bit set, i.e. is one byte of a
+// multi-byte UTF-8 sequence. PostgreSQL puts that whole range in its
+// identifier character classes -- scan.l has
+//
+//	ident_start	[A-Za-z\200-\377_]
+//	ident_cont	[A-Za-z\200-\377_0-9\$]
+//
+// and the same for dollar-quote tags (dolq_start/dolq_cont) -- so an
+// accented identifier like "prenom" spelled with an e-acute is one token,
+// not one token per byte. Scanning those bytes individually turned
+// "prenom" into "pr <byte> <byte> nom", which is data loss in the plainest
+// sense: the output is no longer the input.
+func isHigh(b byte) bool { return b >= 0x80 }
+
+func isIdentStart(b byte) bool { return isAlpha(b) || isHigh(b) }
+func isIdentCont(b byte) bool  { return isAlpha(b) || isDigit(b) || isHigh(b) || b == '$' }
 func isPunct(b byte) bool {
 	switch b {
 	case '(', ')', '[', ']', ',', ';':
