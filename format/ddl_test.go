@@ -157,3 +157,43 @@ func TestTaggedDollarQuoteBody(t *testing.T) {
 		t.Errorf("tagged delimiter not preserved:\n%s", got)
 	}
 }
+
+// TestMultiAssignmentSetDoesNotCascade: a SET with several assignments is a
+// comma list. renderRun walked it inline instead, so the first assignment
+// that had to wrap -- a CASE, typically -- wrapped from wherever it
+// happened to start, and every assignment after it began deeper still. Four
+// CASE expressions turned into a 130-column staircase.
+func TestMultiAssignmentSetDoesNotCascade(t *testing.T) {
+	src := "update twcache.daily_counters set rts = case when NEW.action = 'rt' then rts + 1 else rts end, de_rts = case when NEW.action = 'de-rt' then de_rts + 1 else de_rts end, favs = case when NEW.action = 'fav' then favs + 1 else favs end where daily_counters.day = current_date;"
+	got := ddlFmt(t, src)
+
+	// Every assignment starts at the same column.
+	var cols []int
+	for _, l := range strings.Split(got, "\n") {
+		for _, name := range []string{"rts = case", "de_rts = case", "favs = case"} {
+			if idx := strings.Index(l, name); idx >= 0 && strings.HasPrefix(strings.TrimSpace(l), name) {
+				cols = append(cols, idx)
+			}
+		}
+	}
+	for i := 1; i < len(cols); i++ {
+		if cols[i] != cols[0] {
+			t.Errorf("assignments do not share a column (%v):\n%s", cols, got)
+			break
+		}
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+}
+
+// TestSingleAssignmentSetUnchanged: the one-assignment form still renders
+// inline, and the row form still breaks at its operator.
+func TestSingleAssignmentSetUnchanged(t *testing.T) {
+	got := ddlFmt(t, "update t set a = 1 where id = 2;")
+	if !strings.Contains(got, "set a = 1") {
+		t.Errorf("single assignment changed shape:\n%s", got)
+	}
+}

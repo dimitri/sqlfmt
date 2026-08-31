@@ -1370,10 +1370,21 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 	case "from":
 		bodyLines = layoutFrom(body, baseIndent, width)
 	case "set":
-		if l, ok := layoutRowAssignment(body, baseIndent, width); ok {
-			bodyLines = l
-		} else {
-			bodyLines = renderRun(body, bodyCol)
+		switch {
+		case len(splitTopLevelComma(trimTokens(body))) > 1:
+			// A multi-assignment SET is a comma list, and gets the same
+			// one-item-per-line treatment as SELECT's. renderRun instead
+			// walked it inline, so the first assignment that had to wrap
+			// -- a CASE, typically -- did so from wherever it happened to
+			// start, and every assignment after it began deeper still: four
+			// CASE expressions cascaded into a 130-column staircase.
+			bodyLines = layoutCommaList(body, bodyCol)
+		default:
+			if l, ok := layoutRowAssignment(body, baseIndent, width); ok {
+				bodyLines = l
+			} else {
+				bodyLines = renderRun(body, bodyCol)
+			}
 		}
 	default:
 		bodyLines = renderRun(body, bodyCol)

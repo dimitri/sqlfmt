@@ -315,10 +315,15 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 			// come back wider and more ragged than the author's own
 			// version. The author's version is then the better answer, and
 			// leaving it is always correct.
-			// Indentation legitimately lengthens lines, so the test is
-			// not "longer than before" but "pushed past the target width
-			// when it was not there already".
-			if maxLineLen(pl) > targetWidth && maxLineLen(pl) > maxLineLen(inner) {
+			// The guard is here to catch pathological output -- a
+			// construct the SQL layout cascades into a staircase running
+			// well past the page -- not to enforce rule 17, which is a
+			// soft target. Indentation legitimately lengthens lines, and a
+			// body that lands a column or two over the target is still far
+			// better than an unformatted one, so the comparison is against
+			// the author's own longest line plus a tolerance for the
+			// indentation this adds.
+			if maxLineLen(pl) > maxLineLen(inner)+plBodyTolerance {
 				continue
 			}
 			formatted = pl
@@ -333,6 +338,11 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 	}
 	return out
 }
+
+// plBodyTolerance is how much longer than the author's own longest line a
+// formatted PL/pgSQL body may be before it is rejected as worse than what
+// it replaces -- roughly the indentation a couple of nested blocks add.
+const plBodyTolerance = 8
 
 // maxLineLen returns the length of the longest line in s.
 func maxLineLen(s string) int {
