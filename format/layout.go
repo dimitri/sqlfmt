@@ -411,6 +411,140 @@ func isUnaryContext(prevPrev *Token) bool {
 // parenthesized subqueries and plain parenthesized groups. It returns
 // rendered lines; line 0 has no leading indent (the caller has already
 // written up to col), later lines carry full absolute indentation.
+// fillCommaList packs comma-separated items onto as few lines as fit
+// within targetWidth, each continuation line starting at col. Unlike
+// layoutCommaList, which gives every item its own line, this keeps a long
+// list of short items compact -- an INSERT column list or a VALUES row
+// reads as a list, not as a column of one-word lines.
+//
+// It reports ok=false when filling cannot help: if col is already so deep
+// that even a single item overflows, breaking the list only adds ragged
+// lines to an over-long one, and the caller should leave it alone.
+// layoutRowAssignment renders the multiple-column form of UPDATE ... SET,
+// "set (a, b, ...) = (x, y, ...)", when it does not fit on one line. Both
+// sides are parenthesized lists that routinely run to a couple of hundred
+// characters between them, and there is no column deep inside the second
+// list from which breaking helps -- the break has to be at the "=", which
+// is a clause-level decision renderRun cannot make from inside the
+// expression:
+//
+//	set (name, bio, nationality, gender, begin, "end", wiki_qid, ulan)
+//	  = (batch.name, batch.bio, batch.nationality, batch.gender,
+//	     batch.begin, batch."end", batch.wiki_qid, batch.ulan)
+//
+// The "=" is right-aligned into the clause river, the same way
+// layoutPredicateList aligns a continuation AND/OR under its clause
+// keyword. Each side is then filled across lines if it needs to be.
+//
+// ok is false when this is not the row form, or when it already fits.
+func layoutRowAssignment(body []Token, baseIndent, width int) ([]string, bool) {
+	body = trimTokens(body)
+	eq := topLevelRowOp(body)
+	if eq < 0 {
+		return nil, false
+	}
+	op := body[eq].Lower
+	lhs, rhs := trimTokens(body[:eq]), trimTokens(body[eq+1:])
+	if !isParenGroup(lhs) || !isParenGroup(rhs) {
+		return nil, false
+	}
+	bodyCol := baseIndent + width + 1
+	if bodyCol+len(plainJoin(body)) <= targetWidth {
+		return nil, false // fits as it is
+	}
+
+	side := func(g []Token, col int) []string {
+		flat := plainJoin(g)
+		if col+len(flat) <= targetWidth {
+			return []string{flat}
+		}
+		if filled, ok := fillCommaList(g[1:len(g)-1], col+1); ok {
+			filled[0] = "(" + filled[0]
+			filled[len(filled)-1] += ")"
+			return filled
+		}
+		return []string{flat}
+	}
+
+	lines := side(lhs, bodyCol)
+	opPad := width - len(op)
+	if opPad < 0 {
+		opPad = 0
+	}
+	rhsLines := side(rhs, bodyCol)
+	rhsLines[0] = strings.Repeat(" ", baseIndent+opPad) + op + " " + rhsLines[0]
+	return append(lines, rhsLines...), true
+}
+
+// rowCompareOps are the operators that can sit between two parenthesized
+// row constructors and therefore make a sensible break point.
+var rowCompareOps = map[string]bool{
+	"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true,
+	"is": true, "in": true,
+}
+
+// topLevelRowOp returns the index of a top-level row-comparison operator,
+// or -1.
+func topLevelRowOp(toks []Token) int {
+	depth := 0
+	for i, t := range toks {
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth == 0 && rowCompareOps[t.Lower]:
+			return i
+		}
+	}
+	return -1
+}
+
+// isParenGroup reports whether toks is exactly one parenthesized group.
+func isParenGroup(toks []Token) bool {
+	return len(toks) >= 2 && toks[0].Text == "(" && matchParen(toks, 0) == len(toks)-1
+}
+
+func fillCommaList(inner []Token, col int) (lines []string, ok bool) {
+	items := splitTopLevelComma(trimTokens(inner))
+	if len(items) < 2 {
+		return nil, false
+	}
+	texts := make([]string, len(items))
+	for i, it := range items {
+		texts[i] = plainJoin(trimTokens(it))
+		if col+len(texts[i]) > targetWidth {
+			return nil, false
+		}
+	}
+	cur := ""
+	for i, t := range texts {
+		piece := t
+		if i < len(texts)-1 {
+			piece += ","
+		}
+		switch {
+		case cur == "":
+			cur = piece
+		case col+len(cur)+1+len(piece) <= targetWidth:
+			cur += " " + piece
+		default:
+			lines = append(lines, cur)
+			cur = piece
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) < 2 {
+		return nil, false // it fitted after all; nothing gained
+	}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Repeat(" ", col) + lines[i]
+	}
+	return lines, true
+}
+
 func renderRun(toks []Token, col int) []string {
 	lines := []string{""}
 	curCol := col
@@ -537,6 +671,25 @@ func renderRun(toks []Token, col int) []string {
 				}
 			} else {
 				content := renderRun(inner, curCol)
+				// A standalone parenthesized comma list that overflows --
+				// an INSERT column list, a VALUES row, the sides of
+				// "set (a, ...) = (x, ...)" -- is filled across lines,
+				// aligned just inside its own paren. needSpace excludes a
+				// function call's argument list (rule 4: no space before
+				// its "("), which the corpus keeps on one line. fill
+				// declines when the paren sits too deep for breaking to
+				// help, leaving the flat form rather than a ragged one.
+				if needSpace && len(content) == 1 &&
+					curCol+len(content[0]) > targetWidth {
+					if filled, fok := fillCommaList(inner, curCol+1); fok {
+						write("(")
+						merge(filled)
+						write(")")
+						prevPrev, prev = prev, &toks[close]
+						i = close + 1
+						continue
+					}
+				}
 				if len(content) > 1 {
 					breakIndent := leadingSpaces(lines[len(lines)-1]) + 2
 					content = renderRun(inner, breakIndent)
@@ -977,6 +1130,16 @@ func layoutPredicateList(toks []Token, endCol int) []string {
 		lead := leadingCommentLines(p, startCol)
 		trailing := trailingCommentSuffix(p)
 		pLines := renderRun(p, startCol)
+		// A row comparison, "(a, b, ...) <> (x, y, ...)", has the same
+		// shape problem as the SET row form: no column inside the second
+		// list is a useful break point, the operator is.
+		// baseIndent 0 / width endCol puts the operator's own right edge at
+		// endCol, the column the clause keyword and any AND/OR end at.
+		if len(pLines) == 1 && startCol+len(pLines[0]) > targetWidth {
+			if l, ok := layoutRowAssignment(trimTokens(p), 0, endCol); ok {
+				pLines = l
+			}
+		}
 		pLines[len(pLines)-1] += trailing
 		// idx 0's line is appended directly after the clause keyword by the
 		// caller (renderClause, which also strips its leading comment), so
@@ -1206,6 +1369,12 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 		bodyLines = layoutPredicateList(body, baseIndent+width)
 	case "from":
 		bodyLines = layoutFrom(body, baseIndent, width)
+	case "set":
+		if l, ok := layoutRowAssignment(body, baseIndent, width); ok {
+			bodyLines = l
+		} else {
+			bodyLines = renderRun(body, bodyCol)
+		}
 	default:
 		bodyLines = renderRun(body, bodyCol)
 	}

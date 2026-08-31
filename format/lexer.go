@@ -339,6 +339,44 @@ func (l *lexer) scanDollarString() (Token, error) {
 	return Token{Kind: TokDollarString, Text: text, Lower: text}, nil
 }
 
+// SplitDollarQuoted splits a dollar-quoted string literal into its
+// delimiter and its body: "$tag$body$tag$" -> ("$tag$", "body", true). It
+// reports false for anything that is not exactly one complete dollar-quoted
+// string.
+//
+// The delimiter rules are the lexer's own (isDollarQuoteStart /
+// scanDollarString), which are PostgreSQL's: an opening "$", an optional
+// identifier tag, a closing "$", and a body that runs to the next
+// occurrence of that same delimiter. Both body formatters -- LANGUAGE SQL
+// and PL/pgSQL -- go through this rather than hand-parsing, because
+// PostgreSQL uses one lexer for dollar quoting regardless of the language
+// inside, and a formatter that guessed differently in either place would
+// mis-split a body whose text contains a "$".
+func SplitDollarQuoted(s string) (delim, body string, ok bool) {
+	if !isDollarQuoteStart([]byte(s), 0) {
+		return "", "", false
+	}
+	i := 1
+	for i < len(s) && isIdentCont(s[i]) && s[i] != '$' {
+		i++
+	}
+	if i >= len(s) || s[i] != '$' {
+		return "", "", false
+	}
+	delim = s[:i+1]
+	rest := s[len(delim):]
+	end := strings.Index(rest, delim)
+	if end < 0 {
+		return "", "", false
+	}
+	// Exactly one dollar-quoted string: nothing may follow the closing
+	// delimiter, or this is a body with trailing options we must not touch.
+	if len(rest) != end+len(delim) {
+		return "", "", false
+	}
+	return delim, rest[:end], true
+}
+
 func (l *lexer) scanParam() (Token, error) {
 	start := l.pos
 	l.advance() // : or $

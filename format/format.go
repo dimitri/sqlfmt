@@ -298,7 +298,7 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 		if c.name != "as" {
 			continue
 		}
-		tag, inner, ok := splitDollarQuote(c.body)
+		tag, inner, ok := SplitDollarQuoted(strings.TrimSpace(c.body))
 		if !ok {
 			continue
 		}
@@ -309,25 +309,6 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 		out[i].body = tag + "\n" + strings.TrimRight(formatted, "\n") + "\n" + tag
 	}
 	return out
-}
-
-// splitDollarQuote splits "$tag$body$tag$" into its tag and body. It
-// reports false for anything that is not a single, complete dollar-quoted
-// string -- a body with trailing options after it, say.
-func splitDollarQuote(s string) (tag, inner string, ok bool) {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "$") {
-		return "", "", false
-	}
-	end := strings.Index(s[1:], "$")
-	if end < 0 {
-		return "", "", false
-	}
-	tag = s[:end+2]
-	if !strings.HasSuffix(s, tag) || len(s) < 2*len(tag) {
-		return "", "", false
-	}
-	return tag, s[len(tag) : len(s)-len(tag)], true
 }
 
 // ddlClause is one rendered continuation clause: its keyword and the text

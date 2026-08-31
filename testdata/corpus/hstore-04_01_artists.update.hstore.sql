@@ -6,10 +6,15 @@ create temp table batch(like moma.artist including all) on commit drop;
 
 with upd as (
        update moma.artist
-          set (name, bio, nationality, gender, begin, "end", wiki_qid, ulan) = (batch.name, batch.bio, batch.nationality, batch.gender, batch.begin, batch."end", batch.wiki_qid, batch.ulan)
+          set (name, bio, nationality, gender, begin, "end", wiki_qid, ulan)
+            = (batch.name, batch.bio, batch.nationality, batch.gender,
+               batch.begin, batch."end", batch.wiki_qid, batch.ulan)
          from batch
         where batch.constituentid = artist.constituentid
-          and (artist.name, artist.bio, artist.nationality, artist.gender, artist.begin, artist."end", artist.wiki_qid, artist.ulan) <> (batch.name, batch.bio, batch.nationality, batch.gender, batch.begin, batch."end", batch.wiki_qid, batch.ulan)
+          and (artist.name, artist.bio, artist.nationality, artist.gender,
+               artist.begin, artist."end", artist.wiki_qid, artist.ulan)
+           <> (batch.name, batch.bio, batch.nationality, batch.gender,
+               batch.begin, batch."end", batch.wiki_qid, batch.ulan)
     returning artist.constituentid
 ),
 ins as (

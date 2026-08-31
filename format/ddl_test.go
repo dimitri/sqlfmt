@@ -115,3 +115,55 @@ func TestDDLIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// TestRowAssignmentBreaksAtTheOperator: "set (a, ...) = (x, ...)" and the
+// row comparison "(a, ...) <> (x, ...)" both run to a couple of hundred
+// columns with no useful break point inside either list. The break has to
+// be at the operator, which is a clause-level decision renderRun cannot
+// make from inside the expression -- 246 columns before this.
+func TestRowAssignmentBreaksAtTheOperator(t *testing.T) {
+	src := "update moma.artist set (name, bio, nationality, gender, begin, \"end\", wiki_qid, ulan) = (batch.name, batch.bio, batch.nationality, batch.gender, batch.begin, batch.\"end\", batch.wiki_qid, batch.ulan) from batch where batch.constituentid = artist.constituentid;"
+	got := ddlFmt(t, src)
+	if !strings.Contains(got, "\n  = (batch.name") && !strings.Contains(got, "= (batch.name") {
+		t.Errorf("no break at the operator:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+}
+
+// TestFillKeepsListsCompact: a wrapped list is filled, not exploded one
+// item per line -- it should still read as a list.
+func TestFillKeepsListsCompact(t *testing.T) {
+	src := "update t set (alpha, bravo, charlie, delta, echo, foxtrot, golf, hotel) = (one, two, three, four, five, six, seven, eight) where id = 1;"
+	got := ddlFmt(t, src)
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Count(l, ",") == 1 && strings.Contains(l, "one") {
+			t.Errorf("list exploded one item per line:\n%s", got)
+		}
+	}
+}
+
+// TestFunctionCallArgsNotWrapped: rule 4's no-space-before-"(" marks a
+// function call, and the corpus keeps long calls on one line -- breaking
+// their arguments reads worse than the overflow.
+func TestFunctionCallArgsNotWrapped(t *testing.T) {
+	got := ddlFmt(t, "select st_transscale(st_intersection(r.geom, win.env), -proj.x0, -proj.y0, proj.scale, proj.scale) as geom from r;")
+	if strings.Contains(got, "st_transscale(\n") {
+		t.Errorf("function call arguments were wrapped:\n%s", got)
+	}
+}
+
+// TestTaggedDollarQuoteBody: dollar-quote matching uses the lexer's own
+// rules, so a $tag$ body containing a "$" is split correctly.
+func TestTaggedDollarQuoteBody(t *testing.T) {
+	got := ddlFmt(t, "create function f(x int) returns int language sql as $body$ select x+1 from t where y = '$notatag$'; $body$;")
+	if !strings.Contains(got, "'$notatag$'") {
+		t.Errorf("body content lost:\n%s", got)
+	}
+	if !strings.Contains(got, "as $body$\n") {
+		t.Errorf("tagged delimiter not preserved:\n%s", got)
+	}
+}
