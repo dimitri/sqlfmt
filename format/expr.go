@@ -114,6 +114,25 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 	// logic below is right to refuse to hang a clause paren, which left
 	// the whole thing as one unbreakable atom. Defer the OVER in place
 	// instead, so it can lay itself out at whatever column it lands at.
+	// An aggregate's FILTER / WITHIN GROUP suffix goes on its own line,
+	// starting at the same column as the aggregate it qualifies:
+	//
+	//	count(*)
+	//	filter(where milliseconds is null and position is null) as dnfs
+	//
+	// rather than aligned under the "(" of the aggregate's own arguments,
+	// which is where layoutOver puts a window frame. The suffix is a
+	// continuation of one expression at one level, not something nested
+	// inside the call, and starting it back at the expression's own column
+	// keeps its contents near the margin instead of compounding the
+	// indent -- so if the suffix has to break in turn, it still has room.
+	if head, suffix, ok := splitTrailingAggSuffix(toks); ok {
+		return group(concat(
+			exprAtomDoc(head, levels),
+			line(),
+			text(plainJoin(suffix)),
+		))
+	}
 	if head, over, ok := splitTrailingOver(toks); ok {
 		return concat(
 			text(plainJoin(head)+" "),
@@ -210,6 +229,34 @@ func clauseParen(toks []Token, i int) bool {
 		return i > 1 && toks[i-2].Kind == TokKeyword && toks[i-2].Lower == "within"
 	}
 	return false
+}
+
+// splitTrailingAggSuffix cuts a run that ends in an aggregate's FILTER or
+// WITHIN GROUP clause into the aggregate and the suffix.
+func splitTrailingAggSuffix(toks []Token) ([]Token, []Token, bool) {
+	n := len(toks)
+	if n < 4 || toks[n-1].Text != ")" {
+		return nil, nil, false
+	}
+	open := matchParenBack(toks, n-1)
+	if open < 1 || !clauseParen(toks, open) {
+		return nil, nil, false
+	}
+	// OVER is a clause paren too, but it keeps the deferral to layoutOver:
+	// a window frame's own clauses (PARTITION BY, ORDER BY, ROWS BETWEEN)
+	// each need a line, which is a layout, not a single suffix to move.
+	if toks[open-1].Lower == "over" {
+		return nil, nil, false
+	}
+	// "within group" is two words; "filter" is one.
+	start := open - 1
+	if toks[start].Lower == "group" {
+		start--
+	}
+	if start <= 0 {
+		return nil, nil, false
+	}
+	return trimTokens(toks[:start]), toks[start:], true
 }
 
 // splitTrailingOver cuts a run that ends in an OVER(...) clause into the

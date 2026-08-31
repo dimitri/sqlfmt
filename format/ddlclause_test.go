@@ -99,3 +99,86 @@ func TestConstraintClausesAreRiverAligned(t *testing.T) {
 		t.Errorf("values at columns %d and %d, want them aligned:\n%s", keyCol, refCol, got)
 	}
 }
+
+// PREPARE's payload is a statement, and went through flatJoin -- one
+// 144-column line carrying a complete SELECT.
+func TestPrepareHandsItsBodyToTheQueryLayout(t *testing.T) {
+	src := "prepare foo as select date, shares, trades, dollars from factbook" +
+		" where date >= $1::date and date < $1::date + interval '1 month' order by date;\n"
+	got := mustFormat(t, src)
+	if !strings.HasPrefix(got, "prepare foo as\n") {
+		t.Errorf("header not on its own line:\n%s", got)
+	}
+	// The body is a real query river: every clause keyword ends at one column.
+	end := -1
+	for _, l := range strings.Split(got, "\n") {
+		for _, kw := range []string{"select ", "from ", "where ", "and ", "order by "} {
+			if i := strings.Index(l, kw); i >= 0 && strings.TrimLeft(l, " ") == strings.TrimLeft(l[i:], " ") {
+				if e := i + len(kw) - 1; end == -1 {
+					end = e
+				} else if e != end {
+					t.Errorf("clause keyword ends at %d, want %d:\n%s", e, end, got)
+				}
+				break
+			}
+		}
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if cols(l) > targetWidth {
+			t.Errorf("line over the margin (%d):\n%s", cols(l), got)
+		}
+	}
+}
+
+// A typed table still has a column list: "of" between the name and the
+// paren belongs to the name. "partition" deliberately does not, so a
+// partition definition still falls through to its own clause layout.
+func TestTypedTableKeepsItsColumnList(t *testing.T) {
+	got := mustFormat(t, "create table rate of rate_t(exclude using gist(currency with =, validity with &&));\n")
+	if !strings.Contains(got, "create table rate of rate_t\n") {
+		t.Errorf("typed table header not on its own line:\n%s", got)
+	}
+	if !strings.Contains(got, "  exclude using gist(") {
+		t.Errorf("EXCLUDE not laid out as a table constraint:\n%s", got)
+	}
+	part := mustFormat(t, "create table lab.invoice_2022 partition of lab.invoice_by_year for values from (2022) to (2023);\n")
+	if !strings.Contains(part, "  partition of lab.invoice_by_year") {
+		t.Errorf("partition definition lost its clause layout:\n%s", part)
+	}
+}
+
+// An aggregate's FILTER / WITHIN GROUP suffix starts at the same column as
+// the aggregate it qualifies, not under the "(" of the aggregate's own
+// arguments -- it continues one expression at one level rather than
+// nesting inside the call, which leaves its contents room to break.
+func TestAggregateSuffixStartsAtTheAggregateColumn(t *testing.T) {
+	src := "select season, count(*) filter(where milliseconds is null and position is null) as dnfs," +
+		" percentile_cont(array[0.5, 0.9, 0.95, 0.99]) within group (order by cts - ats) as parr from r;\n"
+	got := mustFormat(t, src)
+	lines := strings.Split(got, "\n")
+	for i, l := range lines {
+		t := strings.TrimLeft(l, " ")
+		if !strings.HasPrefix(t, "filter(") && !strings.HasPrefix(t, "within group ") {
+			continue
+		}
+		suffixCol := len(l) - len(t)
+		aggCol := len(lines[i-1]) - len(strings.TrimLeft(lines[i-1], " "))
+		if suffixCol != aggCol {
+			return // reported below
+		}
+	}
+	for i, l := range lines {
+		tl := strings.TrimLeft(l, " ")
+		if !strings.HasPrefix(tl, "filter(") && !strings.HasPrefix(tl, "within group ") {
+			continue
+		}
+		if got, want := len(l)-len(tl), len(lines[i-1])-len(strings.TrimLeft(lines[i-1], " ")); got != want {
+			t.Errorf("suffix at column %d, aggregate at %d:\n%s", got, want, strings.Join(lines, "\n"))
+		}
+	}
+	// OVER keeps its own layout: a frame's clauses each need a line.
+	over := mustFormat(t, "select avg(res.points) over(order by r.round rows between 2 preceding and current row)::numeric as x from t;\n")
+	if !strings.Contains(over, "over(\n") {
+		t.Errorf("OVER lost its frame layout:\n%s", over)
+	}
+}

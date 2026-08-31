@@ -172,6 +172,8 @@ func formatStatement(toks []Token) string {
 		lines = formatQuerySegment(body, 0)
 	case "alter":
 		lines = layoutAlter(body)
+	case "prepare":
+		lines = layoutPrepare(body)
 	case "grant", "revoke":
 		if l, ok := layoutIndentedClauses(body, grantClauses, 2); ok {
 			lines = l
@@ -212,6 +214,41 @@ func formatStatement(toks []Token) string {
 		out += commentMarker + trailingCommentText(tc)
 	}
 	return out
+}
+
+// layoutPrepare puts a PREPARE's header on its own line and hands the
+// statement it prepares to the query layout, which is how the corpus
+// writes it:
+//
+//	prepare foo as
+//	 select date, shares, trades, dollars
+//	   from factbook
+//	  where date >= $1::date
+//
+// Without this the whole thing went through flatJoin -- one 144-column
+// line carrying a complete SELECT.
+func layoutPrepare(toks []Token) []string {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 || t.Kind != TokKeyword || t.Lower != "as" {
+			continue
+		}
+		rest := trimTokens(toks[i+1:])
+		if !isQueryStart(rest) {
+			break
+		}
+		head := flatJoin(toks[:i+1])
+		return append([]string{head}, formatQuerySegment(rest, 1)...)
+	}
+	return flatStatementLines(toks)
 }
 
 // flatStatementLines renders a statement the layout has no clause
@@ -713,8 +750,13 @@ func createTableColumnList(toks []Token) int {
 			continue
 		}
 		for j := 2; j < i; j++ {
+			// "of" belongs to the table's name -- "create table rate of
+			// rate_t (...)" is a typed table and still has a column list.
+			// "partition" deliberately stays disallowed, so a partition
+			// definition falls through to its own clause layout.
 			if toks[j].Kind == TokKeyword && toks[j].Lower != "if" &&
-				toks[j].Lower != "not" && toks[j].Lower != "exists" {
+				toks[j].Lower != "not" && toks[j].Lower != "exists" &&
+				toks[j].Lower != "of" {
 				return -1
 			}
 		}
@@ -751,7 +793,8 @@ func layoutCreateTable(toks []Token) []string {
 	close := matchParen(toks, open)
 	items := splitTopLevelComma(trimTokens(toks[open+1 : close]))
 
-	constraintKws := map[string]bool{"primary": true, "unique": true, "check": true, "constraint": true, "foreign": true}
+	constraintKws := map[string]bool{"primary": true, "unique": true, "check": true,
+		"constraint": true, "foreign": true, "exclude": true}
 	isConstraint := func(it []Token) bool {
 		it = trimTokens(it)
 		return len(it) > 0 && it[0].Kind == TokKeyword && constraintKws[it[0].Lower]

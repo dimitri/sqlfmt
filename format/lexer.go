@@ -88,6 +88,7 @@ var keywords = buildKeywordSet([]string{
 	// "alter table t ATTACH partition p", and "GRANT SELECT" as
 	// "GRANT select" -- rule 1 lowercasing whichever word of the pair
 	// already happened to be in this table.
+	"prepare", "deallocate",
 	"attach", "detach", "validate", "rename", "add", "column",
 	"privileges", "database", "encoding", "owner", "grant", "revoke",
 	"template", "cascade", "restrict", "role", "usage", "tables",
