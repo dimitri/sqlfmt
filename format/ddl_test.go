@@ -197,3 +197,50 @@ func TestSingleAssignmentSetUnchanged(t *testing.T) {
 		t.Errorf("single assignment changed shape:\n%s", got)
 	}
 }
+
+// TestCreateViewKeepsItsQuery: a view is its query. layoutDDL scanned the
+// payload for its own clause words, so a view's SELECT was chopped up at
+// its own FROM/AS/ON and most of it dropped -- 1344 characters of SQL in,
+// 355 out, on the corpus file that found this.
+func TestCreateViewKeepsItsQuery(t *testing.T) {
+	src := `create or replace view v as
+with recursive deps as (
+  select a.id as obj_id, b.name as obj_name from t a join u b on b.id = a.id where a.k in ('v', 'm')
+  union all
+  select p.id, p.name from deps p join t x on x.id = p.id where x.k in ('v', 'm')
+)
+select depth, obj_name as dependent from deps group by depth, obj_name;`
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\nin:  %s\nout: %s", squash(src), squash(got))
+	}
+	if !strings.Contains(got, "create or replace view v as\n") {
+		t.Errorf("view header not on its own line:\n%s", got)
+	}
+	if !strings.Contains(got, "\nwith recursive deps as (") {
+		t.Errorf("payload not formatted as a query:\n%s", got)
+	}
+}
+
+// TestCreateViewWithFromInPayload is the narrow case: FROM is a DDL clause
+// word too, and a view's payload is full of them.
+func TestCreateViewWithFromInPayload(t *testing.T) {
+	src := "create view v as select a, b from t where c = 1 order by a;"
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+}
+
+// TestTrailingLanguageStillFound: scanning has to resume after a
+// dollar-quoted body -- that is where a trailing LANGUAGE clause lives --
+// while still stopping at a view's query payload.
+func TestTrailingLanguageStillFound(t *testing.T) {
+	// Long enough to break across lines: a DDL statement that fits on one
+	// stays there per rule 17, and there is then nothing to reorder.
+	got := ddlFmt(t, "create or replace function chinook.album_duration(album_id bigint) returns interval as $$ select sum(milliseconds) * interval '1ms' from track where track.album_id = album_duration.album_id; $$ language sql;")
+	langAt, asAt := strings.Index(got, "language sql"), strings.Index(got, "as $$")
+	if langAt == -1 || asAt == -1 || langAt > asAt {
+		t.Errorf("trailing LANGUAGE not hoisted:\n%s", got)
+	}
+}

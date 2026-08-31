@@ -236,6 +236,17 @@ func layoutDDL(toks []Token) []string {
 	if len(bounds) == 0 {
 		return []string{flatJoin(toks)}
 	}
+	// A view is its query: "create view v as" on one line, then the query
+	// laid out as it would be on its own. Running it through the clause
+	// river below would put "as" on a line of its own and leave the query
+	// flat beside it.
+	if last := bounds[len(bounds)-1]; last.name == "as" && len(bounds) == 1 {
+		body := trimTokens(toks[last.idx+1:])
+		if isQueryStart(body) {
+			head := flatJoin(toks[:last.idx]) + " as"
+			return append([]string{head}, strings.Split(formatStatement(body), "\n")...)
+		}
+	}
 	head := flatJoin(toks[:bounds[0].idx])
 	if len(head)+1+len(flatJoin(toks[bounds[0].idx:])) <= targetWidth {
 		return []string{flatJoin(toks)}
@@ -392,6 +403,19 @@ func hoistLanguage(clauses []ddlClause) []ddlClause {
 	return out
 }
 
+// isQueryStart reports whether toks begins a query -- the payload of a
+// CREATE VIEW or a CREATE TABLE ... AS.
+func isQueryStart(toks []Token) bool {
+	if len(toks) == 0 || toks[0].Kind != TokKeyword {
+		return false
+	}
+	switch toks[0].Lower {
+	case "select", "with", "values", "table":
+		return true
+	}
+	return false
+}
+
 // matchDDLWords is matchWords without the TokKeyword requirement. Several
 // DDL clause introducers -- BEFORE, AFTER, EXECUTE, RETURNS, INCLUDE,
 // TABLESPACE -- are not in the lexer's keyword table and lex as plain
@@ -433,6 +457,19 @@ func ddlClauseBounds(toks []Token) []ddlBound {
 		for _, cw := range ddlClauseWords {
 			if matchDDLWords(toks, i, cw.words) {
 				out = append(out, ddlBound{idx: i, name: cw.name, words: cw.words})
+				if cw.name == "as" {
+					// AS introduces the payload. A dollar-quoted function
+					// body is a single token, so scanning can resume after
+					// it -- that is where a trailing LANGUAGE clause lives.
+					// A view's payload is a query, which has FROM/AS/ON of
+					// its own: continuing to scan chopped the SELECT up at
+					// its own clause keywords and dropped most of it.
+					if i+1 < len(toks) && toks[i+1].Kind == TokDollarString {
+						i++
+						break
+					}
+					return out
+				}
 				i += len(cw.words) - 1
 				break
 			}
