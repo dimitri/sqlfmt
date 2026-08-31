@@ -144,3 +144,41 @@ func TestDocLayerIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// A group must weigh what follows it on the line, not just itself. The
+// call below fits at column 0 on its own, but the alias that trails it
+// does not, and only a continuation-aware fits check can see that.
+func TestGroupCountsItsContinuation(t *testing.T) {
+	call := group(concat(
+		text("format("),
+		nest(2, concat(soft(), fill(concat(text(","), line()),
+			text("'%s %s'"), text("drivers.forename"), text("drivers.surname")))),
+		soft(),
+		text(")"),
+	))
+	if got := renderDoc(call, 0); len(got) != 1 {
+		t.Fatalf("call alone fits at col 0, want 1 line, got %d: %q", len(got), got)
+	}
+	d := concat(call, text(` as "Driver's Champion"`))
+	got := renderDoc(d, 9)
+	for _, l := range got {
+		if len(l) > targetWidth {
+			t.Errorf("line over margin: %d cols %q", len(l), l)
+		}
+	}
+	if len(got) < 2 {
+		t.Fatalf("want the call broken to make room for the alias, got %q", got)
+	}
+}
+
+// tailOf stops at the first break opportunity: content beyond a break is
+// not on this line and must not count against it.
+func TestTailStopsAtBreak(t *testing.T) {
+	rest := []Doc{text("ab"), line(), text("cdefgh")}
+	if got := tailOf(rest, 0); got != 2 {
+		t.Errorf("tailOf = %d, want 2 (stop at the line)", got)
+	}
+	if got := tailOf([]Doc{text("ab"), text("cd")}, 3); got != 7 {
+		t.Errorf("tailOf = %d, want 7 (no break, so the outer tail carries)", got)
+	}
+}

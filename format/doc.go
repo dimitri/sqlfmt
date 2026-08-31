@@ -142,9 +142,63 @@ func flatWidth(d Doc) int {
 // has already placed it -- and continuation lines are indented by col plus
 // whatever Nest adds.
 func renderDoc(d Doc, col int) []string {
+	return renderDocTail(d, col, 0)
+}
+
+// renderDocTail is renderDoc told what follows: tail is the number of
+// columns the caller will still write on d's last line.
+func renderDocTail(d Doc, col, tail int) []string {
 	r := &docRenderer{col: col, out: []string{""}}
-	r.render(d, col, false)
+	r.render(d, col, false, tail)
 	return r.out
+}
+
+// headWidth returns how much of d is guaranteed to land on the line it
+// starts on -- its width up to the first point where a break could be
+// taken -- and whether it stopped at such a point.
+//
+// This is what a group's fits check needs to know about what follows it.
+// Wadler's fits measures the flattened group *together with its
+// continuation*; measuring the group alone lets the text after it push the
+// line past the margin, which is how "format(...) as elem" overflowed
+// while the call itself was judged to fit. Stopping at the first break
+// opportunity keeps the measure a lower bound: we never invent pressure
+// that a later break would have relieved.
+func headWidth(d Doc) (int, bool) {
+	switch d.kind {
+	case docText:
+		return len(d.text), false
+	case docLine, docSoft, docHard:
+		return 0, true
+	case docDefer:
+		if d.flat == "" {
+			return 0, true
+		}
+		return len(d.flat), false
+	}
+	total := 0
+	for _, p := range d.parts {
+		w, stop := headWidth(p)
+		total += w
+		if stop {
+			return total, true
+		}
+	}
+	return total, false
+}
+
+// tailOf measures the siblings that follow on the same line, falling back
+// to the enclosing tail once none of them can break.
+func tailOf(rest []Doc, outer int) int {
+	total := 0
+	for _, p := range rest {
+		w, stop := headWidth(p)
+		total += w
+		if stop {
+			return total
+		}
+	}
+	return total + outer
 }
 
 type docRenderer struct {
@@ -163,8 +217,9 @@ func (r *docRenderer) newline(indent int) {
 }
 
 // render emits d. broken says whether the enclosing group chose to break;
-// indent is the column continuation lines start at.
-func (r *docRenderer) render(d Doc, indent int, broken bool) {
+// indent is the column continuation lines start at; tail is how many
+// columns the caller still writes on d's last line.
+func (r *docRenderer) render(d Doc, indent int, broken bool, tail int) {
 	switch d.kind {
 	case docText:
 		r.write(d.text)
@@ -181,15 +236,15 @@ func (r *docRenderer) render(d Doc, indent int, broken bool) {
 	case docHard:
 		r.newline(indent)
 	case docNest:
-		r.render(d.parts[0], indent+d.indent, broken)
+		r.render(d.parts[0], indent+d.indent, broken, tail)
 	case docConcat:
-		for _, p := range d.parts {
-			r.render(p, indent, broken)
+		for i, p := range d.parts {
+			r.render(p, indent, broken, tailOf(d.parts[i+1:], tail))
 		}
 	case docDefer:
 		// Flat if it fits where we are, otherwise let the clause layer lay
 		// it out at this column.
-		if d.flat != "" && r.col+len(d.flat) <= targetWidth {
+		if d.flat != "" && r.col+len(d.flat)+tail <= targetWidth {
 			r.write(d.flat)
 			return
 		}
@@ -211,29 +266,36 @@ func (r *docRenderer) render(d Doc, indent int, broken bool) {
 			part := d.parts[i]
 			if part.kind == docConcat && len(part.parts) == 2 &&
 				(part.parts[1].kind == docLine || part.parts[1].kind == docSoft) {
-				r.render(part.parts[0], indent, broken)
+				r.render(part.parts[0], indent, broken, 0)
 				w := 0
 				if i+1 < len(d.parts) {
 					w = flatWidth(d.parts[i+1])
+				}
+				// Only the last item carries the enclosing tail: what
+				// follows the whole list -- ") as elem" -- lands on its line.
+				nextTail := 0
+				if i+1 == len(d.parts)-1 {
+					nextTail = tail
 				}
 				sepW := 0
 				if part.parts[1].kind == docLine {
 					sepW = 1
 				}
-				if w >= 0 && r.col+sepW+w <= targetWidth {
-					r.render(part.parts[1], indent, false)
+				if w >= 0 && r.col+sepW+w+nextTail <= targetWidth {
+					r.render(part.parts[1], indent, false, 0)
 				} else {
 					r.newline(indent)
 				}
 				continue
 			}
-			r.render(part, indent, broken)
+			r.render(part, indent, broken, tailOf(d.parts[i+1:], tail))
 		}
 	case docGroup:
 		// The whole group's decision, made here and once: flat if what it
-		// would occupy fits in what is left of the line.
+		// would occupy, plus what follows it on the line, fits in what is
+		// left.
 		w := flatWidth(d.parts[0])
-		fits := w >= 0 && r.col+w <= targetWidth
-		r.render(d.parts[0], indent, !fits)
+		fits := w >= 0 && r.col+w+tail <= targetWidth
+		r.render(d.parts[0], indent, !fits, tail)
 	}
 }
