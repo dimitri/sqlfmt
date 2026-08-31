@@ -62,6 +62,11 @@ var keywords = buildKeywordSet([]string{
 	"primary", "key", "unique", "check", "references", "default",
 	"begin", "commit", "rollback", "transaction",
 	"over", "partition", "window", "rows", "range", "unbounded",
+	// The aggregate suffixes. Without them "count(*) FILTER (WHERE ...)"
+	// came out as "count(*) FILTER(where ...)" and "WITHIN GROUP" as
+	// "WITHIN group" -- rule 1 lowercasing half of each construct because
+	// only its second word was in this table.
+	"filter", "within",
 	"preceding", "following", "current", "row",
 	"grouping", "sets", "cube", "rollup",
 	"cast", "language", "function", "returns", "true", "false",

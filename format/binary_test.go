@@ -164,3 +164,46 @@ func TestColsCountsColumnsNotBytes(t *testing.T) {
 		t.Errorf("rule was re-wrapped:\n%s", got)
 	}
 }
+
+// A call with a single wide argument has to be able to hang it, or it has
+// nowhere to break at all.
+func TestSoleArgumentHangs(t *testing.T) {
+	src := "select jsonb_strip_nulls(jsonb_build_object('cmc', data ->> 'cmc', 'power', data -> 'power', 'toughness', data -> 'toughness')) as stats from cards;\n"
+	got := mustFormat(t, src)
+	if !strings.Contains(got, "jsonb_strip_nulls(\n") {
+		t.Errorf("sole argument did not hang:\n%s", got)
+	}
+}
+
+// The three shapes that must NOT hang: a clause paren has a good one-line
+// form of its own, and a grouping paren has no callee, so hanging it
+// strands "(" on a line above a stray ")".
+func TestSoleArgumentDoesNotHangClauseOrGroupParens(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"over", "select rank() over(partition by constructorid order by position nulls last) as r, x from t;\n"},
+		{"within group", "select percentile_cont(array[0.5, 0.99]) within group (order by count) as pct from counts;\n"},
+		{"grouping paren", "select '<a>' || (-(((pos)[1] - proj.y0) * proj.scale) + (case when rn % 2 = 0 then 9 else -4 end))::text from p;\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mustFormat(t, c.src)
+			for _, l := range strings.Split(got, "\n") {
+				if strings.HasSuffix(strings.TrimRight(l, " "), "(") {
+					t.Errorf("paren left hanging on its own line:\n%s", got)
+				}
+			}
+		})
+	}
+}
+
+// "filter" and "within" are keywords, so rule 1 lowercases both words of
+// each construct rather than only the one that happened to be in the
+// table -- "WITHIN GROUP" used to come out as "WITHIN group".
+func TestAggregateSuffixKeywordsAreLowercased(t *testing.T) {
+	got := mustFormat(t, "select percentile_cont(0.5) WITHIN GROUP (ORDER BY x), count(*) FILTER (WHERE y > 0) from t;\n")
+	for _, want := range []string{"within group (order by x)", "filter(where y > 0)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want %q in:\n%s", want, got)
+		}
+	}
+}

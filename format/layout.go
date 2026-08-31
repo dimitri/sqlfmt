@@ -433,7 +433,11 @@ func spaceBetween(prevPrev *Token, prev, next Token) bool {
 		// treat them as calls here too since "(" never directly follows
 		// them in JOIN-modifier position (join modifiers are always
 		// followed by "join", never "(").
+		// "filter" joins this list rather than changing shape now that it
+		// is a keyword: the corpus writes "filter(where ...)" closed up,
+		// the way it writes "over(...)".
 		if prev.Kind == TokIdent || prev.Lower == "using" || prev.Lower == "over" ||
+			prev.Lower == "filter" ||
 			prev.Lower == "left" || prev.Lower == "right" {
 			return false
 		}

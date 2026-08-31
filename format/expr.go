@@ -116,7 +116,20 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 			inner := trimTokens(toks[open+1 : len(toks)-1])
 			if len(inner) > 0 {
 				items := splitTopLevelComma(inner)
-				if len(items) > 1 {
+				// A lone argument may hang from its paren too, so a
+				// single wide call has somewhere to break -- but not when
+				// the paren opens a clause rather than an argument list.
+				// OVER(...), FILTER(...) and WITHIN GROUP(...) each read
+				// as one unit with a good one-line form, and hanging them
+				// turned a fitting window frame into three lines: shorter
+				// and worse.
+				// It must also actually be a call: "(a + b)::text" is a
+				// grouping paren with no callee in front of it, and
+				// hanging its one item strands the "(" on a line of its
+				// own above a stray ")".
+				soleOK := len(items) == 1 && isCallParen(toks, open) &&
+					!clauseParen(toks, open)
+				if len(items) > 1 || soleOK {
 					// Arguments fill rather than going one per line: a
 					// five-argument call broken onto five lines is not
 					// what the corpus does and reads worse than two.
@@ -140,6 +153,27 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 		}
 	}
 	return text(plainJoin(toks))
+}
+
+// isCallParen reports whether the "(" at i follows a name, i.e. opens a
+// call's argument list rather than grouping an expression.
+func isCallParen(toks []Token, i int) bool {
+	return i > 0 && (toks[i-1].Kind == TokIdent || toks[i-1].Kind == TokKeyword)
+}
+
+// clauseParen reports whether the "(" at i opens a clause -- OVER,
+// FILTER, WITHIN GROUP -- rather than a call's argument list.
+func clauseParen(toks []Token, i int) bool {
+	if i == 0 || toks[i-1].Kind != TokKeyword {
+		return false
+	}
+	switch toks[i-1].Lower {
+	case "over", "filter":
+		return true
+	case "group":
+		return i > 1 && toks[i-2].Kind == TokKeyword && toks[i-2].Lower == "within"
+	}
+	return false
 }
 
 // deferredConstruct wraps a run that is exactly one CASE ... END, or one
