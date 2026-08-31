@@ -791,7 +791,21 @@ func layoutCreateTable(toks []Token) []string {
 			if prevWasColumn {
 				lines = append(lines, "")
 			}
-			lines = append(lines, "  "+flatJoin(it)+comma+trailing)
+			// A wide constraint breaks the way the corpus writes it, with
+			// REFERENCES a step further in than the key it qualifies.
+			// flatJoin alone left "foreign key (a, b, c) references
+			// t(a, b, c)" on one 97-column line.
+			flat := flatJoin(it)
+			if cols(flat)+2+cols(comma) > targetWidth {
+				if l, ok := layoutIndentedClauses(it, constraintClauses, 4); ok && len(l) > 1 {
+					l[len(l)-1] += comma + trailing
+					lines = append(lines, "  "+l[0])
+					lines = append(lines, l[1:]...)
+					prevWasColumn = false
+					continue
+				}
+			}
+			lines = append(lines, "  "+flat+comma+trailing)
 			prevWasColumn = false
 			continue
 		}

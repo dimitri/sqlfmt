@@ -44,6 +44,15 @@ var (
 	defaultPrivClauses = []clauseStarter{
 		{"in", "schema"}, {"grant"}, {"revoke"}, {"on"}, {"to"}, {"from"},
 	}
+	// A table constraint that does not fit puts its REFERENCES (and any
+	// action clauses) on the next line, one step further in:
+	//
+	//	foreign key (isocode, regcode, discode)
+	//	  references geoname.district(isocode, regcode, discode),
+	constraintClauses = []clauseStarter{
+		{"references"}, {"on", "delete"}, {"on", "update"}, {"check"},
+		{"deferrable"}, {"not", "deferrable"}, {"initially"}, {"match"},
+	}
 	// Inside one ALTER TABLE subcommand: "add constraint c check (...) not
 	// valid" is three lines by hand, not one.
 	alterInnerClauses = []clauseStarter{

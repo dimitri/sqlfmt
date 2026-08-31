@@ -108,6 +108,20 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 	if expr, cast := splitTrailingCast(toks); cast != "" {
 		return concat(exprAtomDoc(expr, levels), text(cast))
 	}
+	// "avg(x) over(...)" and "avg(x) over(...)::numeric" once the cast is
+	// peeled: the OVER clause has a layout of its own, but the run does
+	// not start with it, so deferredConstruct never fired -- and the paren
+	// logic below is right to refuse to hang a clause paren, which left
+	// the whole thing as one unbreakable atom. Defer the OVER in place
+	// instead, so it can lay itself out at whatever column it lands at.
+	if head, over, ok := splitTrailingOver(toks); ok {
+		return concat(
+			text(plainJoin(head)+" "),
+			defer_(plainJoin(over), func(col int) []string {
+				return layoutOver(over, col)
+			}),
+		)
+	}
 	// A trailing parenthesized group is the interesting case: a call's
 	// arguments, a row constructor, an IN list.
 	if toks[len(toks)-1].Text == ")" {
@@ -174,6 +188,30 @@ func clauseParen(toks []Token, i int) bool {
 		return i > 1 && toks[i-2].Kind == TokKeyword && toks[i-2].Lower == "within"
 	}
 	return false
+}
+
+// splitTrailingOver cuts a run that ends in an OVER(...) clause into the
+// windowed expression and the clause itself. The run must not be the OVER
+// alone -- deferredConstruct already handles that.
+func splitTrailingOver(toks []Token) ([]Token, []Token, bool) {
+	depth := 0
+	for i := range toks {
+		switch toks[i].Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 || i == 0 || toks[i].Kind != TokKeyword || toks[i].Lower != "over" {
+			continue
+		}
+		if i+1 < len(toks) && toks[i+1].Text == "(" && matchParen(toks, i+1) == len(toks)-1 {
+			return toks[:i], toks[i:], true
+		}
+	}
+	return nil, nil, false
 }
 
 // deferredConstruct wraps a run that is exactly one CASE ... END, or one

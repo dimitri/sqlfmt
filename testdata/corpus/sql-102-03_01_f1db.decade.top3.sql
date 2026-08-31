@@ -4,7 +4,10 @@ with decades as (
     group by decade
 )
              select decade,
-                    rank() over(partition by decade order by wins desc) as rank,
+                    rank() over(
+                                partition by decade
+                                order by wins desc
+                           ) as rank,
                     forename,
                     surname,
                     wins

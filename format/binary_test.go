@@ -180,7 +180,6 @@ func TestSoleArgumentHangs(t *testing.T) {
 // strands "(" on a line above a stray ")".
 func TestSoleArgumentDoesNotHangClauseOrGroupParens(t *testing.T) {
 	cases := []struct{ name, src string }{
-		{"over", "select rank() over(partition by constructorid order by position nulls last) as r, x from t;\n"},
 		{"within group", "select percentile_cont(array[0.5, 0.99]) within group (order by count) as pct from counts;\n"},
 		{"grouping paren", "select '<a>' || (-(((pos)[1] - proj.y0) * proj.scale) + (case when rn % 2 = 0 then 9 else -4 end))::text from p;\n"},
 	}
@@ -193,6 +192,50 @@ func TestSoleArgumentDoesNotHangClauseOrGroupParens(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An OVER that fits stays on one line: the sole-argument path must not
+// reach for it just because the select list around it had to break.
+// When it does not fit, splitTrailingOver hands it to layoutOver, whose
+// own style aligns the frame under the paren -- that is a different path
+// and is covered by TestWideOverIsDeferredToLayoutOver.
+func TestFittingOverStaysOnOneLine(t *testing.T) {
+	got := mustFormat(t, "select a_column, rank() over(partition by c order by p) as r from t;\n")
+	if !strings.Contains(got, "rank() over(partition by c order by p) as r") {
+		t.Errorf("a fitting OVER was broken up:\n%s", got)
+	}
+}
+
+// "avg(x) over(...)" does not start with OVER, so deferredConstruct never
+// fired, and the paren logic rightly refuses to hang a clause paren --
+// which left the whole thing one unbreakable atom at 100 columns.
+func TestWideOverIsDeferredToLayoutOver(t *testing.T) {
+	src := "select avg(res.points) over(order by r.round rows between 2 preceding and current row)::numeric as running from results res;\n"
+	got := mustFormat(t, src)
+	if !strings.Contains(got, "avg(res.points) over(\n") {
+		t.Errorf("wide OVER not deferred:\n%s", got)
+	}
+	if !strings.Contains(got, ")::numeric as running") {
+		t.Errorf("cast and alias lost their place:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if cols(l) > targetWidth {
+			t.Errorf("line still over the margin (%d):\n%s", cols(l), got)
+		}
+	}
+}
+
+// A fill packs items onto as few lines as fit, but once an item has
+// broken across lines it ends on a line of its own; packing the next item
+// after it runs two arguments together so they read as one.
+func TestFillBreaksAfterABrokenItem(t *testing.T) {
+	src := "select format('%s / %s', row_number() over(partition by constructorid order by position nulls last), count(*) over(partition by constructorid)) as p from t;\n"
+	got := mustFormat(t, src)
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, ")") && strings.Contains(l, ", count(*)") {
+			t.Errorf("next argument packed onto a broken item's last line:\n%s", got)
+		}
 	}
 }
 

@@ -3,7 +3,10 @@
          position,
          format(
            '%s / %s',
-           row_number() over(partition by constructorid order by position nulls last),
+           row_number() over(
+                             partition by constructorid
+                             order by position nulls last
+                        ),
            count(*) over(partition by constructorid)
          ) as "pos same constr"
     from results

@@ -265,11 +265,21 @@ func (r *docRenderer) render(d Doc, indent int, broken bool, tail int) {
 		// Each separator decides on its own: stay on this line while the
 		// next part still fits, break when it does not. That is what makes
 		// a filled list pack rather than explode one item per line.
+		prevBroke := false
 		for i := 0; i < len(d.parts); i++ {
 			part := d.parts[i]
 			if part.kind == docConcat && len(part.parts) == 2 &&
 				(part.parts[1].kind == docLine || part.parts[1].kind == docSoft) {
 				r.render(part.parts[0], indent, broken, 0)
+				// An item that took more than one line ends on a line of
+				// its own -- the closing paren of a deferred OVER, say --
+				// and packing the next item after it runs two list items
+				// together on that line, which reads as one. Once a part
+				// has broken, its separator breaks too.
+				if prevBroke {
+					r.newline(indent)
+					continue
+				}
 				w := 0
 				if i+1 < len(d.parts) {
 					w = flatWidth(d.parts[i+1])
@@ -291,7 +301,9 @@ func (r *docRenderer) render(d Doc, indent int, broken bool, tail int) {
 				}
 				continue
 			}
+			before := len(r.out)
 			r.render(part, indent, broken, tailOf(d.parts[i+1:], tail))
+			prevBroke = len(r.out) > before
 		}
 	case docGroup:
 		// The whole group's decision, made here and once: flat if what it
