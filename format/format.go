@@ -161,6 +161,8 @@ func formatStatement(toks []Token) string {
 		lines = formatQuerySegment(body, 0)
 	case "explain":
 		lines = layoutExplain(body)
+	case "merge":
+		lines = layoutMerge(body)
 	case "":
 		// A statement that opens with "(" -- the parenthesized arms of a
 		// set operation -- is still a query, and formatQuerySegment knows

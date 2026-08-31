@@ -19,6 +19,12 @@ var clauseWords = []struct {
 }{
 	{[]string{"explain"}, "explain", true},
 	{[]string{"insert", "into"}, "insert into", false},
+	// MERGE's INSERT action has no INTO: "when not matched then insert
+	// (cols) values (...)". Without this the bare "insert" was not a clause
+	// bound, and splitClauses drops whatever precedes the first bound --
+	// so the column list vanished. Must stay after "insert into", which
+	// shares its first word.
+	{[]string{"insert"}, "insert", false},
 	{[]string{"on", "conflict"}, "on conflict", false},
 	{[]string{"group", "by"}, "group by", false},
 	{[]string{"order", "by"}, "order by", false},
@@ -433,6 +439,26 @@ func isUnaryContext(prevPrev *Token) bool {
 // It reports ok=false when filling cannot help: if col is already so deep
 // that even a single item overflows, breaking the list only adds ragged
 // lines to an over-long one, and the caller should leave it alone.
+// layoutValuesRow fills a single, over-wide VALUES row across lines.
+// Reports false for anything else -- several rows, or a row that fits.
+func layoutValuesRow(body []Token, bodyCol int) ([]string, bool) {
+	body = trimTokens(body)
+	items := splitTopLevelComma(body)
+	if len(items) != 1 || !isParenGroup(body) {
+		return nil, false
+	}
+	if bodyCol+len(plainJoin(body)) <= targetWidth {
+		return nil, false
+	}
+	filled, ok := fillCommaList(body[1:len(body)-1], bodyCol+1)
+	if !ok {
+		return nil, false
+	}
+	filled[0] = "(" + filled[0]
+	filled[len(filled)-1] += ")"
+	return filled, true
+}
+
 // layoutInsertTarget renders "insert into t (col, col, ...)". The column
 // list is not a function call's argument list, but it looks exactly like
 // one -- it follows an identifier directly -- so renderRun's paren handling
@@ -1419,7 +1445,17 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 
 	var bodyLines []string
 	switch s.name {
-	case "select", "group by", "order by", "returning", "values":
+	case "values":
+		// A single VALUES row wide enough to overflow is one item as far
+		// as layoutCommaList is concerned -- the whole "(a, b, c)" group --
+		// so it had nothing to break and left the row long. Fill inside the
+		// parens instead. Several rows still go one per line.
+		if l, ok := layoutValuesRow(body, bodyCol); ok {
+			bodyLines = l
+		} else {
+			bodyLines = layoutCommaList(body, bodyCol)
+		}
+	case "select", "group by", "order by", "returning":
 		bodyLines = layoutCommaList(body, bodyCol)
 	case "where":
 		bodyLines = layoutPredicateList(body, baseIndent+width)

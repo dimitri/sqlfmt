@@ -75,6 +75,7 @@ var keywords = buildKeywordSet([]string{
 	// name to start treating as a keyword.
 	"trigger", "procedure", "each", "after", "before", "execute", "returns",
 	"index", "view", "statistics", "sequence", "include", "tablespace",
+	"merge", "matched", "source", "target",
 	"immutable", "stable", "volatile", "strict", "parallel", "security",
 	"definer", "invoker", "concurrently", "unlogged", "inherits",
 })
