@@ -273,37 +273,20 @@ func joinTableLines(toks []Token, col int) []string {
 	if len(lines) == 0 {
 		return []string{""}
 	}
-	// A join whose ON condition is one wide comparison has no comma to
-	// break at and renderRun leaves it long; the Doc layer can break it at
-	// the comparison operator. Only the condition is offered -- the table
-	// and its alias belong on the "join" line.
-	if col+cols(plainJoin(toks)) > targetWidth {
-		if i := joinOnIndex(toks); i > 0 {
-			head := plainJoin(toks[:i+1])
-			if l, ok := predicateLines(trimTokens(toks[i+1:]), col+cols(head)+1); ok {
-				out := []string{head + " " + l[0]}
-				return append(out, l[1:]...)
-			}
-		}
-	}
 	return lines
 }
 
-// joinOnIndex returns the index of a join's top-level ON keyword, or -1.
-func joinOnIndex(toks []Token) int {
-	depth := 0
-	for i, t := range toks {
-		switch t.Text {
-		case "(":
-			depth++
-		case ")":
-			depth--
-		}
-		if depth == 0 && t.Kind == TokKeyword && t.Lower == "on" {
-			return i
+// onPredicateLines renders one ON condition at col, offering it to the Doc
+// layer when it does not fit -- a single wide comparison has no comma to
+// break at and renderRun leaves it long.
+func onPredicateLines(p []Token, col int) []string {
+	lines := renderRun(p, col)
+	if col+cols(plainJoin(p)) > targetWidth {
+		if l, ok := predicateLines(p, col); ok {
+			return l
 		}
 	}
-	return -1
+	return lines
 }
 
 // splitJoinSegments splits a FROM clause's tokens into the leading table
@@ -1696,7 +1679,17 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 	// Cleared before renderRun runs -- see layoutCommaList's identical
 	// ordering concern.
 	firstTrailing := trailingCommentSuffix(segs[0])
-	firstLines := renderRun(trimTokens(segs[0]), joinCol)
+	// The relations before the first JOIN are a comma list, and a wide one
+	// -- "from a, lateral f(...) as t(col)" -- needs the same one-item-
+	// per-line treatment SELECT's list gets, with each item then offered
+	// to the Doc layer. renderRun alone left them on one long line.
+	first := trimTokens(segs[0])
+	var firstLines []string
+	if joinCol+cols(plainJoin(first)) > targetWidth {
+		firstLines = layoutCommaList(first, joinCol)
+	} else {
+		firstLines = renderRun(first, joinCol)
+	}
 	firstLines[len(firstLines)-1] += firstTrailing
 	out := firstLines
 
@@ -1755,8 +1748,16 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			// phrase -- unless the table part is a subquery that wrapped,
 			// in which case the ON goes under it.
 			if len(tl) == 1 {
-				out = append(out, head+tl[0]+" on "+flatJoin(preds[0])+segTrailing)
-				continue
+				inline := head + tl[0] + " on " + flatJoin(preds[0]) + segTrailing
+				if cols(inline) <= targetWidth {
+					out = append(out, inline)
+					continue
+				}
+				// Too wide inline: the ON goes under the join keyword,
+				// river-aligned with it, which is how the corpus writes a
+				// join whose condition does not fit beside it. Without
+				// this check it was emitted at whatever width it came to
+				// -- 87 columns for a substring() condition.
 			}
 			out = append(out, head+tl[0])
 			out = append(out, tl[1:]...)
@@ -1764,7 +1765,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			if pad < 0 {
 				pad = 0
 			}
-			pLines := renderRun(trimTokens(preds[0]), phraseEndCol+1)
+			pLines := onPredicateLines(trimTokens(preds[0]), phraseEndCol+1)
 			pLines[len(pLines)-1] += segTrailing
 			out = append(out, strings.Repeat(" ", pad)+"on "+pLines[0])
 			out = append(out, pLines[1:]...)
@@ -1783,7 +1784,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			if pad < 0 {
 				pad = 0
 			}
-			pLines := renderRun(trimTokens(p), phraseEndCol+1)
+			pLines := onPredicateLines(trimTokens(p), phraseEndCol+1)
 			if idx == len(preds)-1 {
 				pLines[len(pLines)-1] += segTrailing
 			}

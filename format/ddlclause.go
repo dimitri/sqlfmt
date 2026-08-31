@@ -102,6 +102,72 @@ func clauseIndexes(toks []Token, starts []clauseStarter) []int {
 	return out
 }
 
+// headerName is the run of leading keywords that names the construct --
+// "foreign key", "primary key", "unique", "constraint" -- i.e. what comes
+// before its first value.
+func headerName(toks []Token) string {
+	n := 0
+	for n < len(toks) && toks[n].Kind == TokKeyword {
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	return plainJoin(toks[:n])
+}
+
+// layoutRiverClauses is layoutIndentedClauses with the clause keywords
+// right-aligned instead of indented, so that every clause's value starts
+// at the same column -- the river the rest of the tool uses:
+//
+//	foreign key (isocode, regcode, discode)
+//	 references geoname.district(isocode, regcode, discode)
+//
+// "references" is one column further left than "foreign key" precisely so
+// that "geoname" lands under the "(", rather than under "isocode".
+func layoutRiverClauses(toks []Token, starts []clauseStarter, indent int) ([]string, bool) {
+	toks = trimTokens(toks)
+	idx := clauseIndexes(toks, starts)
+	if len(idx) == 0 {
+		return nil, false
+	}
+	head := headerName(toks[:idx[0]])
+	if head == "" {
+		return nil, false
+	}
+	river := cols(head)
+	names := make([]string, len(idx))
+	for n, at := range idx {
+		end := len(toks)
+		if n+1 < len(idx) {
+			end = idx[n+1]
+		}
+		names[n] = headerName(toks[at:end])
+		if names[n] == "" {
+			return nil, false
+		}
+		if w := cols(names[n]); w > river {
+			river = w
+		}
+	}
+	pad := func(name string) string {
+		return strings.Repeat(" ", indent+river-cols(name)) + name
+	}
+	lines := []string{pad(head) + " " + flatJoin(toks[len(strings.Fields(head)):idx[0]])}
+	for n, at := range idx {
+		end := len(toks)
+		if n+1 < len(idx) {
+			end = idx[n+1]
+		}
+		body := trimTokens(toks[at+len(strings.Fields(names[n])) : end])
+		bodyCol := indent + river + 1
+		sub := renderRun(body, bodyCol)
+		lines = append(lines, pad(names[n])+" "+sub[0])
+		lines = append(lines, sub[1:]...)
+	}
+	return lines, true
+}
+
 // layoutIndentedClauses renders toks as a header line followed by one
 // clause per line at the given indent, or as a single line when it fits.
 func layoutIndentedClauses(toks []Token, starts []clauseStarter, indent int) ([]string, bool) {

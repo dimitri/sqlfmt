@@ -797,10 +797,9 @@ func layoutCreateTable(toks []Token) []string {
 			// t(a, b, c)" on one 97-column line.
 			flat := flatJoin(it)
 			if cols(flat)+2+cols(comma) > targetWidth {
-				if l, ok := layoutIndentedClauses(it, constraintClauses, 4); ok && len(l) > 1 {
+				if l, ok := layoutRiverClauses(it, constraintClauses, 2); ok && len(l) > 1 {
 					l[len(l)-1] += comma + trailing
-					lines = append(lines, "  "+l[0])
-					lines = append(lines, l[1:]...)
+					lines = append(lines, l...)
 					prevWasColumn = false
 					continue
 				}

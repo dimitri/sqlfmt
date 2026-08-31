@@ -250,3 +250,68 @@ func TestAggregateSuffixKeywordsAreLowercased(t *testing.T) {
 		}
 	}
 }
+
+// A single-condition ON was inlined after the join phrase with no width
+// check at all. Too wide, it goes under the join keyword, river-aligned
+// with it, which is how the corpus writes it.
+func TestWideJoinConditionGoesUnderTheJoin(t *testing.T) {
+	src := "select 1 from tweet.users join tweet.users f on f.uname = substring(users.bio from 'in love with #?(.*).');\n"
+	got := mustFormat(t, src)
+	var joinCol, onCol int
+	for _, l := range strings.Split(got, "\n") {
+		if i := strings.Index(l, "join "); i >= 0 && joinCol == 0 {
+			joinCol = i + len("join ")
+		}
+		if i := strings.Index(l, "on "); i >= 0 && strings.HasPrefix(strings.TrimLeft(l, " "), "on ") {
+			onCol = i + len("on ")
+		}
+	}
+	if onCol == 0 {
+		t.Fatalf("wide ON not moved onto its own line:\n%s", got)
+	}
+	if onCol != joinCol {
+		t.Errorf("ON body at column %d, join body at %d -- not river-aligned:\n%s", onCol, joinCol, got)
+	}
+	// A short one still stays inline.
+	short := mustFormat(t, "select 1 from a join b on a.id = b.id;\n")
+	if !strings.Contains(short, "join b on a.id = b.id") {
+		t.Errorf("short ON was moved off the join line:\n%s", short)
+	}
+}
+
+// A FROM item's alias can carry a column list. Without peeling it,
+// lastTopLevelOpen picked the alias's own paren, so a wide
+// generate_series was left whole and "as t(date)" was hung instead.
+func TestTableAliasColumnListIsPeeled(t *testing.T) {
+	src := "select * from generate_series(date '2000-01-01', date '2010-01-01', interval '1 year') as t(date);\n"
+	got := mustFormat(t, src)
+	if !strings.Contains(got, ") as t(date)") {
+		t.Errorf("alias column list was broken instead of the call:\n%s", got)
+	}
+	if !strings.Contains(got, "generate_series(\n") {
+		t.Errorf("call did not hang its arguments:\n%s", got)
+	}
+}
+
+// The relations before the first JOIN are a comma list and get the same
+// one-item-per-line treatment SELECT's list gets.
+func TestWideFromListBreaksPerItem(t *testing.T) {
+	got := mustFormat(t, "select * from magic.cards, lateral jsonb_array_elements_text(data -> 'colors') as t(color);\n")
+	if !strings.Contains(got, "from magic.cards,\n") {
+		t.Errorf("FROM list not broken per item:\n%s", got)
+	}
+}
+
+// A "->" chain applied to a wide call was the only joint in a 96-column
+// item, and adjacent string literals are an implicit concatenation whose
+// join has no operator to mark it.
+func TestJSONOperatorAndAdjacentStringsBreak(t *testing.T) {
+	j := mustFormat(t, "select jsonb_insert(data, '{subtypes, 0}', '\"Elemental Dragon\"', true) -> 'subtypes' as appended from cards;\n")
+	if !strings.Contains(j, "\n    -> 'subtypes' as appended") {
+		t.Errorf("JSON operator not a break point:\n%s", j)
+	}
+	s := mustFormat(t, "select '\\draw[arr,bend right=10] (%s,%s)' ' to node[font=\\tiny] (%s,%s);' as tikz from arcs;\n")
+	if !strings.Contains(s, "'\n") {
+		t.Errorf("adjacent literals not broken:\n%s", s)
+	}
+}

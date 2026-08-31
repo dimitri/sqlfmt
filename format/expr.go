@@ -122,6 +122,28 @@ func exprAtomDoc(toks []Token, levels [][]string) Doc {
 			}),
 		)
 	}
+	// "x between a and b" breaks before "between", which is the only
+	// joint in it -- the "and" belongs to the operator, so the predicate
+	// split steps over it and left the whole thing one atom.
+	if lo := topLevelBetween(toks); lo > 0 {
+		return group(concat(
+			exprAtomDoc(trimTokens(toks[:lo]), levels),
+			nest(2, concat(line(), text(plainJoin(toks[lo:])))),
+		))
+	}
+	// Adjacent string literals are an implicit concatenation -- the TikZ
+	// generators build a template that way -- and the join between them is
+	// a break point with no operator to mark it.
+	if parts := splitAdjacentStrings(toks); len(parts) > 1 {
+		ds := make([]Doc, 0, len(parts)*2)
+		for i, p := range parts {
+			if i > 0 {
+				ds = append(ds, line())
+			}
+			ds = append(ds, text(plainJoin(p)))
+		}
+		return group(concat(ds...))
+	}
 	// A trailing parenthesized group is the interesting case: a call's
 	// arguments, a row constructor, an IN list.
 	if toks[len(toks)-1].Text == ")" {
@@ -239,6 +261,69 @@ func deferredConstruct(toks []Token) (Doc, bool) {
 	return Doc{}, false
 }
 
+// topLevelBetween returns the index of a "between" keyword at paren depth
+// zero, or -1. Index 0 does not count: there is nothing to its left to
+// break away from.
+func topLevelBetween(toks []Token) int {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth == 0 && i > 0 && t.Kind == TokKeyword && t.Lower == "between" {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitAdjacentStrings cuts a run at each point where one string literal
+// is directly followed by another, which SQL reads as concatenation.
+func splitAdjacentStrings(toks []Token) [][]Token {
+	var out [][]Token
+	depth, start := 0, 0
+	for i := 1; i < len(toks); i++ {
+		switch toks[i].Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth == 0 && toks[i].Kind == TokString && toks[i-1].Kind == TokString {
+			out = append(out, toks[start:i])
+			start = i
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return append(out, toks[start:])
+}
+
+// matchParenBack returns the index of the "(" matching the ")" at close.
+func matchParenBack(toks []Token, close int) int {
+	depth := 0
+	for i := close; i >= 0; i-- {
+		switch toks[i].Text {
+		case ")":
+			depth++
+		case "(":
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 // splitTrailingCast peels a trailing "::type" (including a schema
 // qualification and array brackets) off an expression, so what remains
 // ends in the ")" the paren layout keys on.
@@ -273,6 +358,18 @@ func splitTrailingCast(toks []Token) ([]Token, string) {
 // confused with an operator's right-hand side.
 func splitTrailingAlias(toks []Token) ([]Token, string) {
 	n := len(toks)
+	// A FROM item's alias can carry a column list -- "as t(color)",
+	// "as r(name text, type text)". Without peeling that too,
+	// lastTopLevelOpen picks the alias's own paren as the thing to break,
+	// so a wide generate_series(...) was left whole and its one-column
+	// alias was hung instead.
+	if n >= 4 && toks[n-1].Text == ")" {
+		if open := matchParenBack(toks, n-1); open > 1 &&
+			toks[open-1].Kind == TokIdent &&
+			toks[open-2].Kind == TokKeyword && toks[open-2].Lower == "as" {
+			return toks[:open-2], plainJoin(toks[open-2:])
+		}
+	}
 	if n >= 3 && toks[n-2].Kind == TokKeyword && toks[n-2].Lower == "as" &&
 		toks[n-3].Text == ")" {
 		return toks[:n-2], "as " + toks[n-1].Text

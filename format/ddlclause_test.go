@@ -75,3 +75,27 @@ func TestDDLVocabularyIsLowercased(t *testing.T) {
 		}
 	}
 }
+
+// A constraint's continuation keywords are right-aligned, not indented,
+// so every clause's value starts at the same column: "geoname" lands
+// under the "(" of the key it qualifies, not under "isocode".
+func TestConstraintClausesAreRiverAligned(t *testing.T) {
+	src := "create table geoname.city (id int, isocode text, regcode text, discode text," +
+		" foreign key (isocode, regcode, discode) references geoname.district(isocode, regcode, discode));\n"
+	got := mustFormat(t, src)
+	var keyCol, refCol int
+	for _, l := range strings.Split(got, "\n") {
+		if i := strings.Index(l, "foreign key ("); i >= 0 {
+			keyCol = i + len("foreign key ")
+		}
+		if i := strings.Index(l, "references "); i >= 0 {
+			refCol = i + len("references ")
+		}
+	}
+	if keyCol == 0 || refCol == 0 {
+		t.Fatalf("constraint not broken:\n%s", got)
+	}
+	if keyCol != refCol {
+		t.Errorf("values at columns %d and %d, want them aligned:\n%s", keyCol, refCol, got)
+	}
+}

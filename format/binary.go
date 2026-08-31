@@ -23,6 +23,10 @@ package format
 // anything here and splitTrailingCast peels it instead.
 var binaryLevels = [][]string{
 	{"||"},
+	// The JSON/containment operators bind like comparison but appear in
+	// value position, where a "->" chain applied to a wide call was the
+	// only joint in a 96-column select-list item.
+	{"->", "->>", "#>", "#>>", "@>", "<@", "?", "?|", "?&", "-|-"},
 	{"+", "-"},
 	{"*", "/", "%"},
 }
