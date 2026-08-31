@@ -259,6 +259,13 @@ func splitPlStatements(body string) ([]plStatement, bool) {
 			if strings.TrimSpace(cur.String()) == "" {
 				cur.Reset()
 				out = append(out, plStatement{comment: cmt})
+				// Same rule as for a statement: the newline that merely
+				// ends this comment is not a blank line. Leaving the flag
+				// set put a blank after every comment -- and since the
+				// output is itself valid input, each reformat added
+				// another one, growing the file by a line per comment per
+				// pass, without limit.
+				sawNewline = false
 			} else {
 				cur.WriteString(" " + cmt)
 			}

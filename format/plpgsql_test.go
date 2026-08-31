@@ -143,3 +143,28 @@ func TestOtherLanguagesUntouched(t *testing.T) {
 		t.Errorf("plpython body was altered:\n%s", got)
 	}
 }
+
+// The formatter's output is itself valid input, so any layout decision
+// that reads the input's own line structure has to be stable. A blank
+// line after every comment in a PL/pgSQL body was not: each reformat
+// added another one, growing the file by a line per comment per pass,
+// without limit.
+func TestPlpgsqlCommentBlockIsStable(t *testing.T) {
+	src := "create function f() returns trigger as $$\nbegin\n" +
+		"  --\n  -- first line of the note\n  -- second line of the note\n  --\n" +
+		"  NEW.x := 1;\n  return NEW;\nend;\n$$ language plpgsql;\n"
+	one := mustFormat(t, src)
+	two := mustFormat(t, one)
+	if one != two {
+		t.Errorf("not idempotent:\n--- pass 1 ---\n%s\n--- pass 2 ---\n%s", one, two)
+	}
+	if strings.Contains(one, "-- first line of the note\n\n") {
+		t.Errorf("blank line inserted inside a comment block:\n%s", one)
+	}
+	// A real blank line between paragraphs is still kept.
+	sep := mustFormat(t, "create function f() returns trigger as $$\nbegin\n"+
+		"  -- one\n\n  -- two\n  NEW.x := 1;\n  return NEW;\nend;\n$$ language plpgsql;\n")
+	if !strings.Contains(sep, "-- one\n\n") {
+		t.Errorf("paragraph break lost:\n%s", sep)
+	}
+}

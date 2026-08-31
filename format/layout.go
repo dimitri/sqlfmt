@@ -276,6 +276,30 @@ func joinTableLines(toks []Token, col int) []string {
 	return lines
 }
 
+// longestAt returns the widest line of a rendered body whose first line
+// starts at col and whose continuation lines carry their own indent.
+func longestAt(body []string, col int) int {
+	longest := col + cols(body[0])
+	for _, l := range body[1:] {
+		if w := cols(l); w > longest {
+			longest = w
+		}
+	}
+	return longest
+}
+
+// fillIsShorter reports whether a filled paren body, starting at col,
+// has a shorter longest line than leaving it flat at flatWidth would.
+func fillIsShorter(filled []string, col, flatWidth int) bool {
+	longest := col + 1 + cols(filled[0])
+	for _, l := range filled[1:] {
+		if w := cols(l); w > longest {
+			longest = w
+		}
+	}
+	return longest < col+flatWidth
+}
+
 // onPredicateLines renders one ON condition at col, offering it to the Doc
 // layer when it does not fit -- a single wide comparison has no comma to
 // break at and renderRun leaves it long.
@@ -873,7 +897,14 @@ func renderRun(toks []Token, col int) []string {
 				// help, leaving the flat form rather than a ragged one.
 				if needSpace && len(content) == 1 &&
 					curCol+cols(content[0]) > targetWidth {
-					if filled, fok := fillCommaList(inner, curCol+1); fok {
+					// Only if it actually shortens the longest line. A
+					// paren with nothing to fill -- one item, no top-level
+					// comma -- came back as "(" alone on the line above a
+					// continuation wider than the flat form had been,
+					// which is both worse and unstable: reformatting that
+					// output produced the one-liner again.
+					if filled, fok := fillCommaList(inner, curCol+1); fok &&
+						fillIsShorter(filled, curCol, cols(content[0])) {
 						write("(")
 						merge(filled)
 						write(")")
@@ -885,12 +916,29 @@ func renderRun(toks []Token, col int) []string {
 				}
 				if len(content) > 1 {
 					breakIndent := leadingSpaces(lines[len(lines)-1]) + 2
-					content = renderRun(inner, breakIndent)
-					write("(")
-					lines = append(lines, strings.Repeat(" ", breakIndent))
-					curCol = breakIndent
-					merge(content)
-					write(")")
+					broken := renderRun(inner, breakIndent)
+					// Breaking has to actually shorten the longest line.
+					// Re-rendering at the shallower breakIndent can turn
+					// the body back into one line no shorter than the flat
+					// form, which strands "(" above it -- and is unstable,
+					// since reformatting that output produces the one-
+					// liner again.
+					if longestAt(broken, breakIndent) >= curCol+cols(plainJoin(inner)) {
+						write("(")
+						write(broken[0])
+						for _, l := range broken[1:] {
+							lines = append(lines, l)
+							curCol = cols(l)
+						}
+						write(")")
+					} else {
+						content = broken
+						write("(")
+						lines = append(lines, strings.Repeat(" ", breakIndent))
+						curCol = breakIndent
+						merge(content)
+						write(")")
+					}
 				} else {
 					write("(")
 					merge(content)
