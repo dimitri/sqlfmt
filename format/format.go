@@ -263,23 +263,46 @@ func layoutDDL(toks []Token) []string {
 	// clauses, and a clause's span is defined by where the *next* one
 	// starts in the source, not in the output.
 	clauses := make([]ddlClause, 0, len(bounds))
+	clauseToks := make([][]Token, 0, len(bounds))
 	for bi, b := range bounds {
 		end := len(toks)
 		if bi+1 < len(bounds) {
 			end = bounds[bi+1].idx
 		}
 		clauses = append(clauses, ddlClause{b.name, flatJoin(toks[b.idx+len(b.words) : end])})
+		clauseToks = append(clauseToks, toks[b.idx+len(b.words):end])
 	}
 	clauses = hoistLanguage(clauses)
 	clauses = formatSQLBody(clauses)
 
-	lines := []string{head}
-	for _, c := range clauses {
-		line := strings.Repeat(" ", width-len(c.name)) + c.name
-		if c.body != "" {
-			line += " " + c.body
+	// The head can overflow on its own -- "create statistics name (kind,
+	// kind, ...)" carries a list too -- and gets the same treatment.
+	headLines := []string{head}
+	if len(head) > targetWidth {
+		if filled, ok := ddlFillBody(toks[:bounds[0].idx], 0); ok {
+			headLines = filled
 		}
-		lines = append(lines, line)
+	}
+	lines := headLines
+	for ci, c := range clauses {
+		prefix := strings.Repeat(" ", width-len(c.name)) + c.name
+		if c.body == "" {
+			lines = append(lines, prefix)
+			continue
+		}
+		if len(prefix)+1+len(c.body) > targetWidth && ci < len(clauseToks) {
+			// An index's column list or a statistics kind list is
+			// call-shaped -- "using btree(a, b, ...)" -- so renderRun's
+			// paren handling leaves it alone per rule 4, and a wide one
+			// overflows. Only the clause knows it is a list, so fill it
+			// here, the same way the INSERT column list is filled.
+			if filled, ok := ddlFillBody(clauseToks[ci], len(prefix)+1); ok {
+				lines = append(lines, prefix+" "+filled[0])
+				lines = append(lines, filled[1:]...)
+				continue
+			}
+		}
+		lines = append(lines, prefix+" "+c.body)
 	}
 	return lines
 }
@@ -369,6 +392,46 @@ func maxLineLen(s string) int {
 // ddlClause is one rendered continuation clause: its keyword and the text
 // that follows it.
 type ddlClause struct{ name, body string }
+
+// ddlFillBody fills a DDL clause body that does not fit: either a trailing
+// parenthesized list ("using btree(a, b, ...)", "on t (a, b, ...)") or a
+// bare comma list ("on isocode, class, feature"). Reports false when there
+// is no list to fill, or when filling would not help.
+func ddlFillBody(toks []Token, col int) ([]string, bool) {
+	toks = trimTokens(toks)
+	if len(toks) == 0 {
+		return nil, false
+	}
+	if toks[len(toks)-1].Text == ")" {
+		open := -1
+		depth := 0
+		for i := len(toks) - 1; i >= 0; i-- {
+			switch toks[i].Text {
+			case ")":
+				depth++
+			case "(":
+				depth--
+				if depth == 0 {
+					open = i
+				}
+			}
+			if open >= 0 {
+				break
+			}
+		}
+		if open >= 0 {
+			head := plainJoin(toks[:open])
+			filled, ok := fillCommaList(toks[open+1:len(toks)-1], col+len(head)+1)
+			if !ok {
+				return nil, false
+			}
+			filled[0] = head + "(" + filled[0]
+			filled[len(filled)-1] += ")"
+			return filled, true
+		}
+	}
+	return fillCommaList(toks, col)
+}
 
 // hoistLanguage moves a LANGUAGE clause that trails the body back into the
 // header, ahead of AS. PostgreSQL accepts a function's option list in any

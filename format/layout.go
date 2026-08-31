@@ -246,6 +246,19 @@ func isJoinModifier(lower string) bool {
 	return false
 }
 
+// joinTableLines renders a JOIN's table expression, keeping it multi-line
+// when it is one. flatJoin was used here, and flatJoin joins renderRun's
+// output with spaces -- so a LATERAL subquery, which renderRun lays out
+// across several lines, was folded back onto the JOIN line and ran to
+// hundreds of columns. Always returns at least one line.
+func joinTableLines(toks []Token, col int) []string {
+	lines := renderRun(trimTokens(toks), col)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
 // splitJoinSegments splits a FROM clause's tokens into the leading table
 // expression and each subsequent JOIN segment (starting at its modifier, if
 // any, else at "join" itself).
@@ -1510,21 +1523,40 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			phrasePad = 0
 		}
 		if onIdx == -1 {
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(rest) + segTrailing
-			out = append(out, line)
+			head := strings.Repeat(" ", phrasePad) + phrase + " "
+			tl := joinTableLines(rest, len(head))
+			tl[len(tl)-1] += segTrailing
+			out = append(out, head+tl[0])
+			out = append(out, tl[1:]...)
 			continue
 		}
 		tablePart := trimTokens(rest[:onIdx])
 		condPart := trimTokens(rest[onIdx+1:])
 		preds, ops := splitAndOr(condPart)
+		head := strings.Repeat(" ", phrasePad) + phrase + " "
+		tl := joinTableLines(tablePart, len(head))
 		if len(preds) == 1 {
-			// Single-condition ON stays inline after the join keyword phrase.
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart) + " on " + flatJoin(preds[0]) + segTrailing
-			out = append(out, line)
+			// Single-condition ON stays inline after the join keyword
+			// phrase -- unless the table part is a subquery that wrapped,
+			// in which case the ON goes under it.
+			if len(tl) == 1 {
+				out = append(out, head+tl[0]+" on "+flatJoin(preds[0])+segTrailing)
+				continue
+			}
+			out = append(out, head+tl[0])
+			out = append(out, tl[1:]...)
+			pad := phraseEndCol - len("on")
+			if pad < 0 {
+				pad = 0
+			}
+			pLines := renderRun(trimTokens(preds[0]), phraseEndCol+1)
+			pLines[len(pLines)-1] += segTrailing
+			out = append(out, strings.Repeat(" ", pad)+"on "+pLines[0])
+			out = append(out, pLines[1:]...)
 			continue
 		}
-		line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart)
-		out = append(out, line)
+		out = append(out, head+tl[0])
+		out = append(out, tl[1:]...)
 		for idx, p := range preds {
 			var kw string
 			if idx == 0 {

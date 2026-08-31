@@ -280,3 +280,69 @@ func TestInsertWithoutColumnList(t *testing.T) {
 		t.Errorf("content changed:\n%s", got)
 	}
 }
+
+// TestDDLClauseListFills: an index's column list and a statistics kind list
+// are call-shaped -- "using btree(a, b, ...)" -- so renderRun leaves them
+// alone per rule 4 and a wide one overflows. Only the clause knows it is a
+// list.
+func TestDDLClauseListFills(t *testing.T) {
+	src := "create index concurrently if not exists chinook_invoice_line_covering_idx on chinook.invoice_line using btree (invoice_id, track_id, unit_price, quantity, invoice_line_id, created_at, updated_at);"
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 85 {
+			t.Errorf("line over 85 columns:\n%s", l)
+		}
+	}
+	if !strings.Contains(got, "using btree(") {
+		t.Errorf("index method lost:\n%s", got)
+	}
+}
+
+// TestDDLBareCommaListFills covers the other shape: "on col, col, col" with
+// no parens at all.
+func TestDDLBareCommaListFills(t *testing.T) {
+	src := "create statistics if not exists geoname_multi_column_stats (dependencies, ndistinct, mcv) on isocode, class, feature, population, name, latitude, longitude from geoname.geoname;"
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 85 {
+			t.Errorf("line over 85 columns:\n%s", l)
+		}
+	}
+}
+
+// TestLateralSubqueryNotFlattened: layoutFrom rendered a JOIN's table
+// expression with flatJoin, which joins renderRun's output with spaces --
+// so a LATERAL subquery, which renderRun lays out across several lines, was
+// folded back onto the JOIN line and ran to hundreds of columns.
+func TestLateralSubqueryNotFlattened(t *testing.T) {
+	src := `select d.surname as driver, top3.race
+  from f1db.drivers d
+  join lateral (
+      select r.name as race, res.points
+        from f1db.results res
+        join f1db.races r on r.raceid = res.raceid
+       where res.driverid = d.driverid and r.year = 2017
+       order by res.points desc
+       limit 3
+  ) top3 on true
+ where d.surname in ('Hamilton', 'Vettel')
+ order by d.surname;`
+	got := ddlFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+	if !strings.Contains(got, "join lateral (\n") {
+		t.Errorf("lateral subquery was flattened onto the JOIN line:\n%s", got)
+	}
+}
