@@ -31,7 +31,9 @@ champs as (
        and champ_constructor.points = tops.ctops
 )
   select season,
-         format('%s %s', drivers.forename, drivers.surname) as "Driver's Champion",
+         format(
+           '%s %s', drivers.forename, drivers.surname
+         ) as "Driver's Champion",
          constructors.name as "Constructor's champion"
     from champs
     join drivers using(driverid)

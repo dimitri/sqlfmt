@@ -19,6 +19,12 @@ var clauseWords = []struct {
 }{
 	{[]string{"explain"}, "explain", true},
 	{[]string{"insert", "into"}, "insert into", false},
+	// MERGE's INSERT action has no INTO: "when not matched then insert
+	// (cols) values (...)". Without this the bare "insert" was not a clause
+	// bound, and splitClauses drops whatever precedes the first bound --
+	// so the column list vanished. Must stay after "insert into", which
+	// shares its first word.
+	{[]string{"insert"}, "insert", false},
 	{[]string{"on", "conflict"}, "on conflict", false},
 	{[]string{"group", "by"}, "group by", false},
 	{[]string{"order", "by"}, "order by", false},
@@ -136,25 +142,26 @@ func splitUnionSegments(toks []Token) (segs [][]Token, ops []string) {
 			continue
 		}
 		switch t.Lower {
-		case "union":
+		case "union", "intersect", "except":
+			// All three take an optional ALL or DISTINCT modifier, and it
+			// belongs to the operator, not to the query that follows it.
+			// Only UNION used to consume it: "except all select ..." left
+			// "all" as the first token of the next segment, which rendered
+			// as a stray "all select ..." line -- and, in a segment the
+			// layout then recursed into, could be dropped outright. Losing
+			// it silently turns EXCEPT ALL into EXCEPT, which is a
+			// different result set, not a formatting difference.
 			end := i + 1
-			op := "union"
-			if end < len(toks) && toks[end].Kind == TokKeyword && toks[end].Lower == "all" {
-				op = "union all"
+			op := t.Lower
+			if end < len(toks) && toks[end].Kind == TokKeyword &&
+				(toks[end].Lower == "all" || toks[end].Lower == "distinct") {
+				op += " " + toks[end].Lower
 				end++
 			}
 			segs = append(segs, toks[start:i])
 			ops = append(ops, op)
 			start = end
 			i = end - 1
-		case "intersect":
-			segs = append(segs, toks[start:i])
-			ops = append(ops, "intersect")
-			start = i + 1
-		case "except":
-			segs = append(segs, toks[start:i])
-			ops = append(ops, "except")
-			start = i + 1
 		}
 	}
 	segs = append(segs, toks[start:])
@@ -172,6 +179,16 @@ func splitTopLevelComma(toks []Token) [][]Token {
 		} else if t.Text == ")" {
 			depth--
 		} else if depth == 0 && t.Text == "," {
+			// The comma is dropped here -- it is a separator, not part of
+			// either item -- so a comment trailing on it would vanish with
+			// it. Carry it back onto the item it follows, which is where
+			// the author put it and where the layout can still render it.
+			if tc := toks[i].TrailingComment; tc != nil && i > start {
+				if last := &toks[i-1]; last.TrailingComment == nil {
+					last.TrailingComment = tc
+					toks[i].TrailingComment = nil
+				}
+			}
 			segs = append(segs, toks[start:i])
 			start = i + 1
 		}
@@ -243,6 +260,57 @@ func isJoinModifier(lower string) bool {
 		return true
 	}
 	return false
+}
+
+// joinTableLines renders a JOIN's table expression, keeping it multi-line
+// when it is one. flatJoin was used here, and flatJoin joins renderRun's
+// output with spaces -- so a LATERAL subquery, which renderRun lays out
+// across several lines, was folded back onto the JOIN line and ran to
+// hundreds of columns. Always returns at least one line.
+func joinTableLines(toks []Token, col int) []string {
+	toks = trimTokens(toks)
+	lines := renderRun(toks, col)
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+// longestAt returns the widest line of a rendered body whose first line
+// starts at col and whose continuation lines carry their own indent.
+func longestAt(body []string, col int) int {
+	longest := col + cols(body[0])
+	for _, l := range body[1:] {
+		if w := cols(l); w > longest {
+			longest = w
+		}
+	}
+	return longest
+}
+
+// fillIsShorter reports whether a filled paren body, starting at col,
+// has a shorter longest line than leaving it flat at flatWidth would.
+func fillIsShorter(filled []string, col, flatWidth int) bool {
+	longest := col + 1 + cols(filled[0])
+	for _, l := range filled[1:] {
+		if w := cols(l); w > longest {
+			longest = w
+		}
+	}
+	return longest < col+flatWidth
+}
+
+// onPredicateLines renders one ON condition at col, offering it to the Doc
+// layer when it does not fit -- a single wide comparison has no comma to
+// break at and renderRun leaves it long.
+func onPredicateLines(p []Token, col int) []string {
+	lines := renderRun(p, col)
+	if col+cols(plainJoin(p)) > targetWidth {
+		if l, ok := predicateLines(p, col); ok {
+			return l
+		}
+	}
+	return lines
 }
 
 // splitJoinSegments splits a FROM clause's tokens into the leading table
@@ -372,7 +440,11 @@ func spaceBetween(prevPrev *Token, prev, next Token) bool {
 		// treat them as calls here too since "(" never directly follows
 		// them in JOIN-modifier position (join modifiers are always
 		// followed by "join", never "(").
+		// "filter" joins this list rather than changing shape now that it
+		// is a keyword: the corpus writes "filter(where ...)" closed up,
+		// the way it writes "over(...)".
 		if prev.Kind == TokIdent || prev.Lower == "using" || prev.Lower == "over" ||
+			prev.Lower == "filter" ||
 			prev.Lower == "left" || prev.Lower == "right" {
 			return false
 		}
@@ -410,6 +482,268 @@ func isUnaryContext(prevPrev *Token) bool {
 // parenthesized subqueries and plain parenthesized groups. It returns
 // rendered lines; line 0 has no leading indent (the caller has already
 // written up to col), later lines carry full absolute indentation.
+// fillCommaList packs comma-separated items onto as few lines as fit
+// within targetWidth, each continuation line starting at col. Unlike
+// layoutCommaList, which gives every item its own line, this keeps a long
+// list of short items compact -- an INSERT column list or a VALUES row
+// reads as a list, not as a column of one-word lines.
+//
+// It reports ok=false when filling cannot help: if col is already so deep
+// that even a single item overflows, breaking the list only adds ragged
+// lines to an over-long one, and the caller should leave it alone.
+// layoutConcatChain breaks an over-wide expression at its top-level "||"
+// operators, each continuation line starting with the operator so the
+// chain stays legible:
+//
+//	format('...', a, b)
+//	|| E'\n'
+//	|| format('...', c, d)
+//
+// Reports false when there is no top-level "||", or when breaking there
+// would not bring the line back under the target.
+func layoutConcatChain(toks []Token, startCol int) ([]string, bool) {
+	parts := splitTopLevelConcat(trimTokens(toks))
+	if len(parts) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(parts))
+	for i, part := range parts {
+		pl := renderRun(trimTokens(part), startCol+3)
+		if i == 0 {
+			lines = append(lines, pl[0])
+		} else {
+			lines = append(lines, strings.Repeat(" ", startCol)+"|| "+pl[0])
+		}
+		lines = append(lines, pl[1:]...)
+	}
+	return lines, true
+}
+
+// splitTopLevelConcat splits a token run at its top-level "||" operators.
+//
+// CASE spans are skipped whole. A "||" inside a CASE branch --
+// "else substring(name from 1 for 54) || '...' end" -- is not a top-level
+// operator, and splitting there cut the CASE in half: each half then looked
+// like its own CASE to the layout below, and the "end" came out twice.
+func splitTopLevelConcat(toks []Token) [][]Token {
+	var out [][]Token
+	depth, start := 0, 0
+	for i := 0; i < len(toks); i++ {
+		t := toks[i]
+		if t.Kind == TokKeyword && t.Lower == "case" {
+			if end := matchCaseEnd(toks, i); end > i {
+				i = end
+				continue
+			}
+		}
+		switch t.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		case "||":
+			if depth == 0 {
+				out = append(out, toks[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return append(out, toks[start:])
+}
+
+// layoutValuesRow fills a single, over-wide VALUES row across lines.
+// Reports false for anything else -- several rows, or a row that fits.
+func layoutValuesRow(body []Token, bodyCol int) ([]string, bool) {
+	body = trimTokens(body)
+	items := splitTopLevelComma(body)
+	if len(items) != 1 || !isParenGroup(body) {
+		return nil, false
+	}
+	if bodyCol+cols(plainJoin(body)) <= targetWidth {
+		return nil, false
+	}
+	filled, ok := fillCommaList(body[1:len(body)-1], bodyCol+1)
+	if !ok {
+		return nil, false
+	}
+	filled[0] = "(" + filled[0]
+	filled[len(filled)-1] += ")"
+	return filled, true
+}
+
+// layoutInsertTarget renders "insert into t (col, col, ...)". The column
+// list is not a function call's argument list, but it looks exactly like
+// one -- it follows an identifier directly -- so renderRun's paren handling
+// declines to break it, per rule 4, and a wide list ran off the page. Only
+// the clause knows better, so the fill happens here.
+//
+// ok is false when there is no column list, or when it already fits.
+func layoutInsertTarget(body []Token, bodyCol int) ([]string, bool) {
+	body = trimTokens(body)
+	if len(body) < 3 || body[len(body)-1].Text != ")" {
+		return nil, false
+	}
+	open := -1
+	depth := 0
+	for i := len(body) - 1; i >= 0; i-- {
+		switch body[i].Text {
+		case ")":
+			depth++
+		case "(":
+			depth--
+			if depth == 0 {
+				open = i
+			}
+		}
+		if open >= 0 {
+			break
+		}
+	}
+	if open <= 0 {
+		return nil, false
+	}
+	head := plainJoin(body[:open])
+	flat := head + plainJoin(body[open:])
+	if bodyCol+cols(flat) <= targetWidth {
+		return nil, false
+	}
+	filled, ok := fillCommaList(body[open+1:len(body)-1], bodyCol+len(head)+1)
+	if !ok {
+		return nil, false
+	}
+	filled[0] = head + "(" + filled[0]
+	filled[len(filled)-1] += ")"
+	return filled, true
+}
+
+// layoutRowAssignment renders the multiple-column form of UPDATE ... SET,
+// "set (a, b, ...) = (x, y, ...)", when it does not fit on one line. Both
+// sides are parenthesized lists that routinely run to a couple of hundred
+// characters between them, and there is no column deep inside the second
+// list from which breaking helps -- the break has to be at the "=", which
+// is a clause-level decision renderRun cannot make from inside the
+// expression:
+//
+//	set (name, bio, nationality, gender, begin, "end", wiki_qid, ulan)
+//	  = (batch.name, batch.bio, batch.nationality, batch.gender,
+//	     batch.begin, batch."end", batch.wiki_qid, batch.ulan)
+//
+// The "=" is right-aligned into the clause river, the same way
+// layoutPredicateList aligns a continuation AND/OR under its clause
+// keyword. Each side is then filled across lines if it needs to be.
+//
+// ok is false when this is not the row form, or when it already fits.
+func layoutRowAssignment(body []Token, baseIndent, width int) ([]string, bool) {
+	body = trimTokens(body)
+	eq := topLevelRowOp(body)
+	if eq < 0 {
+		return nil, false
+	}
+	op := body[eq].Lower
+	lhs, rhs := trimTokens(body[:eq]), trimTokens(body[eq+1:])
+	if !isParenGroup(lhs) || !isParenGroup(rhs) {
+		return nil, false
+	}
+	bodyCol := baseIndent + width + 1
+	if bodyCol+cols(plainJoin(body)) <= targetWidth {
+		return nil, false // fits as it is
+	}
+
+	side := func(g []Token, col int) []string {
+		flat := plainJoin(g)
+		if col+cols(flat) <= targetWidth {
+			return []string{flat}
+		}
+		if filled, ok := fillCommaList(g[1:len(g)-1], col+1); ok {
+			filled[0] = "(" + filled[0]
+			filled[len(filled)-1] += ")"
+			return filled
+		}
+		return []string{flat}
+	}
+
+	lines := side(lhs, bodyCol)
+	opPad := width - len(op)
+	if opPad < 0 {
+		opPad = 0
+	}
+	rhsLines := side(rhs, bodyCol)
+	rhsLines[0] = strings.Repeat(" ", baseIndent+opPad) + op + " " + rhsLines[0]
+	return append(lines, rhsLines...), true
+}
+
+// rowCompareOps are the operators that can sit between two parenthesized
+// row constructors and therefore make a sensible break point.
+var rowCompareOps = map[string]bool{
+	"=": true, "<>": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true,
+	"is": true, "in": true,
+}
+
+// topLevelRowOp returns the index of a top-level row-comparison operator,
+// or -1.
+func topLevelRowOp(toks []Token) int {
+	depth := 0
+	for i, t := range toks {
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth == 0 && rowCompareOps[t.Lower]:
+			return i
+		}
+	}
+	return -1
+}
+
+// isParenGroup reports whether toks is exactly one parenthesized group.
+func isParenGroup(toks []Token) bool {
+	return len(toks) >= 2 && toks[0].Text == "(" && matchParen(toks, 0) == len(toks)-1
+}
+
+func fillCommaList(inner []Token, col int) (lines []string, ok bool) {
+	items := splitTopLevelComma(trimTokens(inner))
+	if len(items) < 2 {
+		return nil, false
+	}
+	texts := make([]string, len(items))
+	for i, it := range items {
+		texts[i] = plainJoin(trimTokens(it))
+		if col+cols(texts[i]) > targetWidth {
+			return nil, false
+		}
+	}
+	cur := ""
+	for i, t := range texts {
+		piece := t
+		if i < len(texts)-1 {
+			piece += ","
+		}
+		switch {
+		case cur == "":
+			cur = piece
+		case col+cols(cur)+1+cols(piece) <= targetWidth:
+			cur += " " + piece
+		default:
+			lines = append(lines, cur)
+			cur = piece
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) < 2 {
+		return nil, false // it fitted after all; nothing gained
+	}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Repeat(" ", col) + lines[i]
+	}
+	return lines, true
+}
+
 func renderRun(toks []Token, col int) []string {
 	lines := []string{""}
 	curCol := col
@@ -434,6 +768,21 @@ func renderRun(toks []Token, col int) []string {
 
 	var prev, prevPrev *Token
 	i := 0
+	// A "--" comment on the last token of a span the loop skips over -- a
+	// CASE, an OVER(...), a parenthesized group -- is never seen by the
+	// per-token safety net below, which only runs on the plain path. Left
+	// alone it is dropped outright, which is data loss; written without a
+	// break it would swallow whatever follows it on the line.
+	flushTrailing := func(j int) {
+		if toks[j].TrailingComment == nil {
+			return
+		}
+		write(commentMarker + trailingCommentText(toks[j].TrailingComment))
+		toks[j].TrailingComment = nil
+		lines = append(lines, "")
+		curCol = 0
+	}
+
 	for i < len(toks) {
 		t := toks[i]
 		if isNonLayout(t) {
@@ -478,6 +827,7 @@ func renderRun(toks []Token, col int) []string {
 			}
 			merge(layoutCase(toks[i:end+1], curCol))
 			prevPrev, prev = prev, &toks[end]
+			flushTrailing(end)
 			i = end + 1
 			continue
 		}
@@ -489,12 +839,13 @@ func renderRun(toks []Token, col int) []string {
 				write(" ")
 			}
 			flat := plainJoin(overToks)
-			if curCol+len(flat) <= targetWidth {
+			if curCol+cols(flat) <= targetWidth {
 				write(flat)
 			} else {
 				merge(layoutOver(overToks, curCol))
 			}
 			prevPrev, prev = prev, &toks[close]
+			flushTrailing(close)
 			i = close + 1
 			continue
 		}
@@ -536,14 +887,58 @@ func renderRun(toks []Token, col int) []string {
 				}
 			} else {
 				content := renderRun(inner, curCol)
+				// A standalone parenthesized comma list that overflows --
+				// an INSERT column list, a VALUES row, the sides of
+				// "set (a, ...) = (x, ...)" -- is filled across lines,
+				// aligned just inside its own paren. needSpace excludes a
+				// function call's argument list (rule 4: no space before
+				// its "("), which the corpus keeps on one line. fill
+				// declines when the paren sits too deep for breaking to
+				// help, leaving the flat form rather than a ragged one.
+				if needSpace && len(content) == 1 &&
+					curCol+cols(content[0]) > targetWidth {
+					// Only if it actually shortens the longest line. A
+					// paren with nothing to fill -- one item, no top-level
+					// comma -- came back as "(" alone on the line above a
+					// continuation wider than the flat form had been,
+					// which is both worse and unstable: reformatting that
+					// output produced the one-liner again.
+					if filled, fok := fillCommaList(inner, curCol+1); fok &&
+						fillIsShorter(filled, curCol, cols(content[0])) {
+						write("(")
+						merge(filled)
+						write(")")
+						prevPrev, prev = prev, &toks[close]
+						flushTrailing(close)
+						i = close + 1
+						continue
+					}
+				}
 				if len(content) > 1 {
 					breakIndent := leadingSpaces(lines[len(lines)-1]) + 2
-					content = renderRun(inner, breakIndent)
-					write("(")
-					lines = append(lines, strings.Repeat(" ", breakIndent))
-					curCol = breakIndent
-					merge(content)
-					write(")")
+					broken := renderRun(inner, breakIndent)
+					// Breaking has to actually shorten the longest line.
+					// Re-rendering at the shallower breakIndent can turn
+					// the body back into one line no shorter than the flat
+					// form, which strands "(" above it -- and is unstable,
+					// since reformatting that output produces the one-
+					// liner again.
+					if longestAt(broken, breakIndent) >= curCol+cols(plainJoin(inner)) {
+						write("(")
+						write(broken[0])
+						for _, l := range broken[1:] {
+							lines = append(lines, l)
+							curCol = cols(l)
+						}
+						write(")")
+					} else {
+						content = broken
+						write("(")
+						lines = append(lines, strings.Repeat(" ", breakIndent))
+						curCol = breakIndent
+						merge(content)
+						write(")")
+					}
 				} else {
 					write("(")
 					merge(content)
@@ -551,6 +946,7 @@ func renderRun(toks []Token, col int) []string {
 				}
 			}
 			prevPrev, prev = prev, &toks[close]
+			flushTrailing(close)
 			i = close + 1
 			continue
 		}
@@ -611,14 +1007,25 @@ func plainJoin(toks []Token) string {
 // Alignment is always recomputed fresh per call (STYLE.md rule 15).
 func layoutCase(toks []Token, caseCol int) []string {
 	flat := plainJoin(toks)
-	if caseCol+len(flat) <= targetWidth {
+	if caseCol+cols(flat) <= targetWidth {
 		return []string{flat}
 	}
 
-	// toks[0] == "case". Split remaining into when/then/else branches.
+	// toks[0] == "case". A *simple* CASE puts an operand expression between
+	// "case" and the first "when" ("case grouping(x) when 1 then ..."); a
+	// *searched* CASE goes straight to "when". Consume the operand, if
+	// there is one, onto the "case" line: without this the when-loop below
+	// -- which only advances while it is looking at a "when" -- never
+	// starts, i stays at 1, and every token from the operand up to "end"
+	// is silently dropped, rendering the whole expression as "case end".
 	whenCol := caseCol + len("case ")
-	lines := []string{"case"}
 	i := 1
+	head := "case"
+	if opEnd := caseOperandEnd(toks); opEnd > 1 {
+		head += " " + plainJoin(toks[1:opEnd])
+		i = opEnd
+	}
+	lines := []string{head}
 	for i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "when" {
 		condStart := i + 1
 		thenIdx := -1
@@ -678,6 +1085,24 @@ func layoutCase(toks []Token, caseCol int) []string {
 	return lines
 }
 
+// caseOperandEnd returns the index of the first top-level "when" in a CASE
+// token run, i.e. the end of a simple CASE's operand expression. It returns
+// 1 for a searched CASE ("case when ..."), where there is no operand.
+func caseOperandEnd(toks []Token) int {
+	depth := 0
+	for i := 1; i < len(toks); i++ {
+		switch {
+		case toks[i].Text == "(":
+			depth++
+		case toks[i].Text == ")":
+			depth--
+		case depth == 0 && toks[i].Kind == TokKeyword && toks[i].Lower == "when":
+			return i
+		}
+	}
+	return 1
+}
+
 // layoutOver wraps a long OVER(...) clause: PARTITION BY / ORDER BY / frame
 // clause each on their own line under the opening paren's column.
 // splitTopLevelTwoWord splits toks at the first top-level occurrence of the
@@ -698,36 +1123,94 @@ func splitTopLevelTwoWord(toks []Token, w1, w2 string) [][]Token {
 	return [][]Token{toks}
 }
 
+// layoutOver renders a long OVER(...) with PARTITION BY, ORDER BY, and any
+// frame clause each on its own line under the opening paren's column, per
+// STYLE.md rule 14.
+//
+// splitTopLevelTwoWord returns [before, after]. The ORDER BY search used to
+// run over segs[0] -- the tokens *before* PARTITION BY, which for the usual
+// "over(partition by x order by y)" is empty -- so it never matched: the
+// whole body went out on the "partition by" line and only the ")" moved
+// down, giving a 90+ column line with an orphaned paren under it.
+// Everything after PARTITION BY has to be searched instead.
 func layoutOver(toks []Token, overCol int) []string {
 	openCol := overCol + len("over(")
 	// toks: over ( ... )
 	inner := toks[2 : len(toks)-1]
-	segs := splitTopLevelTwoWord(inner, "partition", "by")
-	var lines []string
-	first := true
+
+	// "over(" keeps a line of its own, with every window clause under the
+	// opening paren's column -- the shape the corpus already uses.
+	lines := []string{"over("}
 	emit := func(prefix string, body []Token) {
-		bodyLines := renderRun(body, openCol+len(prefix))
-		text := strings.Repeat(" ", openCol) + prefix + strings.TrimSpace(bodyLines[0])
-		if first {
-			lines = append(lines, "over("+strings.TrimPrefix(text, strings.Repeat(" ", openCol)))
-			first = false
-		} else {
-			lines = append(lines, text)
+		body = trimTokens(body)
+		if len(body) == 0 {
+			return
 		}
+		bodyLines := renderRun(body, openCol+len(prefix))
+		lines = append(lines, strings.Repeat(" ", openCol)+prefix+strings.TrimSpace(bodyLines[0]))
 		lines = append(lines, bodyLines[1:]...)
 	}
-	if len(segs) == 2 {
-		emit("partition by ", segs[1])
+
+	rest := inner
+	if segs := splitTopLevelTwoWord(inner, "partition", "by"); len(segs) == 2 {
+		// segs[1] is everything after "partition by": the partition
+		// expression list, then any ORDER BY and frame clause.
+		partition, tail := segs[1], []Token(nil)
+		if o := splitTopLevelTwoWord(segs[1], "order", "by"); len(o) == 2 {
+			partition, tail = o[0], o[1]
+			emit("partition by ", partition)
+			emit("order by ", frameSplit(&tail))
+			rest = tail
+		} else {
+			partition, rest = splitFrame(segs[1])
+			emit("partition by ", partition)
+		}
+	} else if o := splitTopLevelTwoWord(inner, "order", "by"); len(o) == 2 {
+		tail := o[1]
+		emit("order by ", frameSplit(&tail))
+		rest = tail
 	} else {
-		lines = append(lines, "over(")
-		first = false
+		body, frame := splitFrame(inner)
+		emit("", body)
+		rest = frame
 	}
-	orderSegs := splitTopLevelTwoWord(segs[0], "order", "by")
-	if len(orderSegs) == 2 {
-		emit("order by ", orderSegs[1])
-	}
+	// Whatever is left is the frame clause ("rows between ...",
+	// "range ...", "groups ...", with an optional "exclude ...").
+	emit("", rest)
+
 	lines = append(lines, strings.Repeat(" ", overCol)+")")
 	return lines
+}
+
+// frameStarters are the keywords that begin a window frame clause, which
+// rule 14 puts on a line of its own after PARTITION BY / ORDER BY.
+var frameStarters = map[string]bool{"rows": true, "range": true, "groups": true}
+
+// splitFrame splits a window-clause token run at the start of its frame
+// clause, returning the part before it and the frame itself (nil when there
+// is no frame).
+func splitFrame(toks []Token) (body, frame []Token) {
+	depth := 0
+	for i, t := range toks {
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth == 0 && t.Kind == TokKeyword && frameStarters[t.Lower]:
+			return toks[:i], toks[i:]
+		}
+	}
+	return toks, nil
+}
+
+// frameSplit peels the frame clause off *tail, leaving *tail holding just
+// the frame and returning the part before it -- a small helper so the
+// ORDER BY body and the frame can be emitted as two separate lines.
+func frameSplit(tail *[]Token) []Token {
+	body, frame := splitFrame(*tail)
+	*tail = frame
+	return body
 }
 
 // layoutCommaList renders a comma-separated list. If the flat form fits
@@ -740,8 +1223,8 @@ func layoutCommaList(toks []Token, startCol int) []string {
 	// flatJoin's underlying renderRun call consumes/clears any comment
 	// metadata on these tokens as a side effect, which the multi-line path
 	// below still needs intact if this fast path doesn't end up taking it.
-	if len(items) > 0 && !anyItemComments(items) {
-		if flat := flatJoin(trimTokens(toks)); startCol+len(flat) <= targetWidth {
+	if len(items) > 0 && !anyItemComments(items) && !hasLineComment(toks) {
+		if flat := flatJoin(trimTokens(toks)); startCol+cols(flat) <= targetWidth {
 			return []string{flat}
 		}
 	}
@@ -756,6 +1239,26 @@ func layoutCommaList(toks []Token, startCol int) []string {
 		lead := leadingCommentLines(it, startCol)
 		trailing := trailingCommentSuffix(it)
 		itLines := renderRun(it, startCol)
+		// A single list item can be far too wide with no comma in it to
+		// break at -- the figure-generating queries build TikZ as one long
+		// "format(...) || E'\n' || format(...)" chain, and a row
+		// comparison puts two wide lists either side of an operator. Those
+		// break points interact, so the choice is made by the Doc layer
+		// (see doc.go), which decides a whole group at a time rather than
+		// greedily where it stands.
+		// Gate on the item's own flat width, not on whether renderRun
+		// happened to break it: renderRun breaks greedily at the first
+		// paren that does not fit, which would pre-empt the Doc layer on
+		// exactly the items it exists for.
+		if startCol+cols(plainJoin(trimTokens(it))) > targetWidth {
+			if el, ok := exprLines(it, startCol); ok {
+				itLines = el
+			} else if len(itLines) == 1 {
+				if cl, ok := layoutConcatChain(it, startCol); ok {
+					itLines = cl
+				}
+			}
+		}
 		if idx < len(items)-1 {
 			// The separating comma belongs on the item's own last rendered
 			// line, not necessarily its first -- an item that itself wraps
@@ -780,6 +1283,21 @@ func layoutCommaList(toks []Token, startCol int) []string {
 // trailing comment -- used to force a multi-line layout even when a
 // flattened single-line render would otherwise fit, since that fast path
 // has nowhere to put a comment.
+// hoistSegmentComments strips every attached comment off toks (in place)
+// and returns them rendered as their own lines at indent. Used where a
+// caller is about to flatten a token run to a single line and would
+// otherwise inline them.
+func hoistSegmentComments(toks []Token, indent int) []string {
+	var out []string
+	for i := range toks {
+		if len(toks[i].Comments) > 0 {
+			out = append(out, renderLeadingComments(toks[i].Comments, indent)...)
+			toks[i].Comments = nil
+		}
+	}
+	return out
+}
+
 func anyTokenComments(toks []Token) bool {
 	for _, t := range toks {
 		if len(t.Comments) > 0 || t.TrailingComment != nil {
@@ -793,6 +1311,31 @@ func anyTokenComments(toks []Token) bool {
 // carries a leading or trailing comment -- used to force the multi-line
 // layout even when the flattened form would otherwise fit inline, since the
 // single-line fast path has nowhere to put a comment.
+// hasLineComment reports whether any token in the run carries a "--"
+// comment, in a leading or a trailing position.
+//
+// Such a run has no valid one-line rendering: everything placed after the
+// comment on that line ends up inside it. renderRun already breaks the
+// line for exactly this reason, but flatJoin joins its lines back with a
+// space, which undoes the protection -- so a flat path has to be refused
+// before it is taken rather than repaired after. anyItemComments is not
+// enough on its own: it looks only at each item's first and last token, so
+// a comment on a separating comma, which belongs to no item at all, was
+// invisible to it.
+func hasLineComment(toks []Token) bool {
+	for i := range toks {
+		if tc := toks[i].TrailingComment; tc != nil && tc.Kind == TokLineComment {
+			return true
+		}
+		for _, c := range toks[i].Comments {
+			if c.Kind == TokLineComment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func anyItemComments(items [][]Token) bool {
 	for _, it := range items {
 		it = trimTokens(it)
@@ -874,6 +1417,23 @@ func layoutPredicateList(toks []Token, endCol int) []string {
 		lead := leadingCommentLines(p, startCol)
 		trailing := trailingCommentSuffix(p)
 		pLines := renderRun(p, startCol)
+		// A row comparison, "(a, b, ...) <> (x, y, ...)", has the same
+		// shape problem as the SET row form: no column inside the second
+		// list is a useful break point, the operator is.
+		// baseIndent 0 / width endCol puts the operator's own right edge at
+		// endCol, the column the clause keyword and any AND/OR end at.
+		// Gate on the predicate's own flat width rather than on whether
+		// renderRun happened to break it, for the reason layoutCommaList
+		// gives: renderRun breaks greedily at the first paren that does
+		// not fit, which pre-empts the Doc layer on exactly the predicates
+		// it exists for.
+		if startCol+cols(plainJoin(trimTokens(p))) > targetWidth {
+			if l, ok := layoutRowAssignment(trimTokens(p), 0, endCol); ok {
+				pLines = l
+			} else if l, ok := predicateLines(trimTokens(p), startCol); ok {
+				pLines = l
+			}
+		}
 		pLines[len(pLines)-1] += trailing
 		// idx 0's line is appended directly after the clause keyword by the
 		// caller (renderClause, which also strips its leading comment), so
@@ -909,6 +1469,13 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 		} else if t.Text == ")" {
 			depth--
 		} else if depth == 0 && t.Kind == TokKeyword && (t.Lower == "and" || t.Lower == "or") {
+			// The "and" in "between X and Y" joins the two bounds of one
+			// predicate; it is not a boolean conjunction, and splitting on
+			// it turned "where y between 2010 and 2017" into two lines that
+			// read as two separate conditions.
+			if t.Lower == "and" && betweenAndAt(toks, start, i) {
+				continue
+			}
 			preds = append(preds, toks[start:i])
 			ops = append(ops, t.Lower)
 			start = i + 1
@@ -916,6 +1483,43 @@ func splitAndOr(toks []Token) ([][]Token, []string) {
 	}
 	preds = append(preds, toks[start:])
 	return preds, ops
+}
+
+// wholeParen reports whether toks is exactly one parenthesized group, and
+// if so returns its contents.
+func wholeParen(toks []Token) ([]Token, bool) {
+	toks = trimTokens(toks)
+	if len(toks) < 3 || toks[0].Text != "(" {
+		return nil, false
+	}
+	if matchParen(toks, 0) != len(toks)-1 {
+		return nil, false
+	}
+	return trimTokens(toks[1 : len(toks)-1]), true
+}
+
+// betweenAndAt reports whether the "and" at index i is the one belonging to
+// a BETWEEN in the same predicate -- i.e. whether an unconsumed "between"
+// appears between the start of the current predicate and that "and". A
+// second BETWEEN inside the same predicate would each claim their own
+// "and", so they are counted rather than merely detected.
+func betweenAndAt(toks []Token, start, i int) bool {
+	depth, pending := 0, 0
+	for j := start; j < i; j++ {
+		t := toks[j]
+		switch {
+		case t.Text == "(":
+			depth++
+		case t.Text == ")":
+			depth--
+		case depth != 0:
+		case t.Kind == TokKeyword && t.Lower == "between":
+			pending++
+		case t.Kind == TokKeyword && t.Lower == "and" && pending > 0:
+			pending--
+		}
+	}
+	return pending > 0
 }
 
 // formatQuerySegment formats a SELECT/INSERT/UPDATE/DELETE (optionally
@@ -951,6 +1555,28 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 			}
 		}
 		return lines
+	}
+
+	// A fully parenthesized query -- the arms of "(select ...) except
+	// (select ...)" are written this way -- has every clause keyword at
+	// depth 1, so splitClauses finds none and the whole arm used to come
+	// back as one flat line, hundreds of columns wide. Unwrap, format the
+	// query inside, and put the parens back.
+	// "(select ...) order by x" -- a parenthesized arm with trailing
+	// clauses of its own. Format the group, then the clauses after it.
+	if len(toks) > 0 && toks[0].Text == "(" {
+		if close := matchParen(toks, 0); close > 0 && close < len(toks)-1 {
+			head := formatQuerySegment(toks[:close+1], baseIndent)
+			return append(head, formatQuerySegment(toks[close+1:], baseIndent)...)
+		}
+	}
+	if inner, ok := wholeParen(toks); ok {
+		body := formatQuerySegment(inner, baseIndent+1)
+		if len(body) > 0 {
+			body[0] = strings.Repeat(" ", baseIndent) + "(" + strings.TrimLeft(body[0], " ")
+			body = append(body, strings.Repeat(" ", baseIndent)+")")
+			return body
+		}
 	}
 
 	segs := splitClauses(toks)
@@ -1029,7 +1655,17 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 
 	var bodyLines []string
 	switch s.name {
-	case "select", "group by", "order by", "returning", "values":
+	case "values":
+		// A single VALUES row wide enough to overflow is one item as far
+		// as layoutCommaList is concerned -- the whole "(a, b, c)" group --
+		// so it had nothing to break and left the row long. Fill inside the
+		// parens instead. Several rows still go one per line.
+		if l, ok := layoutValuesRow(body, bodyCol); ok {
+			bodyLines = l
+		} else {
+			bodyLines = layoutCommaList(body, bodyCol)
+		}
+	case "select", "group by", "order by", "returning":
 		bodyLines = layoutCommaList(body, bodyCol)
 	case "where":
 		bodyLines = layoutPredicateList(body, baseIndent+width)
@@ -1037,6 +1673,29 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 		bodyLines = layoutPredicateList(body, baseIndent+width)
 	case "from":
 		bodyLines = layoutFrom(body, baseIndent, width)
+	case "insert into":
+		if l, ok := layoutInsertTarget(body, bodyCol); ok {
+			bodyLines = l
+		} else {
+			bodyLines = renderRun(body, bodyCol)
+		}
+	case "set":
+		switch {
+		case len(splitTopLevelComma(trimTokens(body))) > 1:
+			// A multi-assignment SET is a comma list, and gets the same
+			// one-item-per-line treatment as SELECT's. renderRun instead
+			// walked it inline, so the first assignment that had to wrap
+			// -- a CASE, typically -- did so from wherever it happened to
+			// start, and every assignment after it began deeper still: four
+			// CASE expressions cascaded into a 130-column staircase.
+			bodyLines = layoutCommaList(body, bodyCol)
+		default:
+			if l, ok := layoutRowAssignment(body, baseIndent, width); ok {
+				bodyLines = l
+			} else {
+				bodyLines = renderRun(body, bodyCol)
+			}
+		}
 	default:
 		bodyLines = renderRun(body, bodyCol)
 	}
@@ -1068,7 +1727,17 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 	// Cleared before renderRun runs -- see layoutCommaList's identical
 	// ordering concern.
 	firstTrailing := trailingCommentSuffix(segs[0])
-	firstLines := renderRun(trimTokens(segs[0]), joinCol)
+	// The relations before the first JOIN are a comma list, and a wide one
+	// -- "from a, lateral f(...) as t(col)" -- needs the same one-item-
+	// per-line treatment SELECT's list gets, with each item then offered
+	// to the Doc layer. renderRun alone left them on one long line.
+	first := trimTokens(segs[0])
+	var firstLines []string
+	if joinCol+cols(plainJoin(first)) > targetWidth {
+		firstLines = layoutCommaList(first, joinCol)
+	} else {
+		firstLines = renderRun(first, joinCol)
+	}
 	firstLines[len(firstLines)-1] += firstTrailing
 	out := firstLines
 
@@ -1080,6 +1749,15 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		out = append(out, leadingCommentLines(seg, joinCol)...)
 		segTrailing := trailingCommentSuffix(seg)
 		kEnd := joinKeywordEnd(seg)
+		// A comment attached to a token inside this segment -- a block
+		// comment above the joined relation, say -- makes renderRun emit
+		// several lines, and flatJoin below would glue them back into one
+		// with the comment inlined, running to 200+ columns. Hoist those
+		// comments out onto their own lines first, at the join column,
+		// which is where a reader expects a comment about this join.
+		if anyTokenComments(seg[kEnd:]) {
+			out = append(out, hoistSegmentComments(seg[kEnd:], joinCol)...)
+		}
 		phrase := flatJoin(seg[:kEnd])
 		rest := seg[kEnd:]
 
@@ -1101,21 +1779,48 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			phrasePad = 0
 		}
 		if onIdx == -1 {
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(rest) + segTrailing
-			out = append(out, line)
+			head := strings.Repeat(" ", phrasePad) + phrase + " "
+			tl := joinTableLines(rest, len(head))
+			tl[len(tl)-1] += segTrailing
+			out = append(out, head+tl[0])
+			out = append(out, tl[1:]...)
 			continue
 		}
 		tablePart := trimTokens(rest[:onIdx])
 		condPart := trimTokens(rest[onIdx+1:])
 		preds, ops := splitAndOr(condPart)
+		head := strings.Repeat(" ", phrasePad) + phrase + " "
+		tl := joinTableLines(tablePart, len(head))
 		if len(preds) == 1 {
-			// Single-condition ON stays inline after the join keyword phrase.
-			line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart) + " on " + flatJoin(preds[0]) + segTrailing
-			out = append(out, line)
+			// Single-condition ON stays inline after the join keyword
+			// phrase -- unless the table part is a subquery that wrapped,
+			// in which case the ON goes under it.
+			if len(tl) == 1 {
+				inline := head + tl[0] + " on " + flatJoin(preds[0]) + segTrailing
+				if cols(inline) <= targetWidth {
+					out = append(out, inline)
+					continue
+				}
+				// Too wide inline: the ON goes under the join keyword,
+				// river-aligned with it, which is how the corpus writes a
+				// join whose condition does not fit beside it. Without
+				// this check it was emitted at whatever width it came to
+				// -- 87 columns for a substring() condition.
+			}
+			out = append(out, head+tl[0])
+			out = append(out, tl[1:]...)
+			pad := phraseEndCol - len("on")
+			if pad < 0 {
+				pad = 0
+			}
+			pLines := onPredicateLines(trimTokens(preds[0]), phraseEndCol+1)
+			pLines[len(pLines)-1] += segTrailing
+			out = append(out, strings.Repeat(" ", pad)+"on "+pLines[0])
+			out = append(out, pLines[1:]...)
 			continue
 		}
-		line := strings.Repeat(" ", phrasePad) + phrase + " " + flatJoin(tablePart)
-		out = append(out, line)
+		out = append(out, head+tl[0])
+		out = append(out, tl[1:]...)
 		for idx, p := range preds {
 			var kw string
 			if idx == 0 {
@@ -1127,7 +1832,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 			if pad < 0 {
 				pad = 0
 			}
-			pLines := renderRun(trimTokens(p), phraseEndCol+1)
+			pLines := onPredicateLines(trimTokens(p), phraseEndCol+1)
 			if idx == len(preds)-1 {
 				pLines[len(pLines)-1] += segTrailing
 			}
@@ -1159,14 +1864,25 @@ func parseCTEs(toks []Token) ([][]Token, []Token) {
 				i = close + 1
 			}
 		}
-		// optional "as"
+		// optional "as", then the optional materialization hint
+		// ("as materialized (" / "as not materialized ("). Without
+		// consuming the hint the "(" test below failed, the CTE body was
+		// never taken, and everything from "materialized" onwards fell out
+		// into the tail -- which is how a MATERIALIZED CTE lost its body.
 		if i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "as" {
 			i++
+			i = skipMaterialized(toks, i)
 		}
 		if i < len(toks) && toks[i].Text == "(" {
 			close := matchParen(toks, i)
 			i = close + 1
 		}
+		// A recursive CTE may be followed by SEARCH and/or CYCLE clauses,
+		// which belong to it rather than to the statement after it. Left in
+		// the tail they were parsed as part of the main query, where CYCLE's
+		// own "set" reads as an UPDATE clause keyword and the clause got
+		// mangled.
+		i = skipSearchCycle(toks, i)
 		ctes = append(ctes, toks[start:i])
 		if i < len(toks) && toks[i].Text == "," {
 			i++
@@ -1175,6 +1891,52 @@ func parseCTEs(toks []Token) ([][]Token, []Token) {
 		break
 	}
 	return ctes, toks[i:]
+}
+
+// skipMaterialized advances past an optional "materialized" /
+// "not materialized" hint following a CTE's "as".
+func skipMaterialized(toks []Token, i int) int {
+	if i < len(toks) && toks[i].Kind == TokKeyword && toks[i].Lower == "not" {
+		if i+1 < len(toks) && toks[i+1].Lower == "materialized" {
+			return i + 2
+		}
+		return i
+	}
+	if i < len(toks) && toks[i].Lower == "materialized" {
+		return i + 1
+	}
+	return i
+}
+
+// skipSearchCycle advances past the SEARCH and CYCLE clauses a recursive
+// CTE may carry, so they stay attached to the CTE they qualify:
+//
+//	search depth first by id set ordercol
+//	cycle id set is_cycle using path
+//
+// Both run to the next "," or to the statement's main SELECT.
+func skipSearchCycle(toks []Token, i int) int {
+	// "search"/"cycle" are not in the keyword table -- they lex as plain
+	// identifiers -- so match on the text, not on Kind.
+	for i < len(toks) && (toks[i].Lower == "search" || toks[i].Lower == "cycle") {
+		i++
+		depth := 0
+		for i < len(toks) {
+			t := toks[i]
+			if t.Text == "(" {
+				depth++
+			} else if t.Text == ")" {
+				depth--
+			} else if depth == 0 && t.Kind == TokKeyword &&
+				(t.Lower == "select" || t.Lower == "search" || t.Lower == "cycle") {
+				break
+			} else if depth == 0 && t.Text == "," {
+				break
+			}
+			i++
+		}
+	}
+	return i
 }
 
 // renderCTE renders one "name [(cols)] as ( body )" CTE entry. withPrefix,
@@ -1194,8 +1956,13 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 			i = colClose + 1
 		}
 	}
+	asText := " as ("
 	if i < len(cte) && cte[i].Kind == TokKeyword && cte[i].Lower == "as" {
 		i++
+		if j := skipMaterialized(cte, i); j > i {
+			asText = " as " + plainJoin(cte[i:j]) + " ("
+			i = j
+		}
 	}
 	open := -1
 	if i < len(cte) && cte[i].Text == "(" {
@@ -1209,11 +1976,14 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 	bodyIndent := baseIndent + 2
 	bodyLines := formatQuerySegment(inner, bodyIndent)
 	lines := lead
-	lines = append(lines, strings.Repeat(" ", baseIndent)+name+" as (")
+	lines = append(lines, strings.Repeat(" ", baseIndent)+name+asText)
 	for _, l := range bodyLines {
 		lines = append(lines, strings.Repeat(" ", bodyIndent)+l)
 	}
 	closing := strings.Repeat(" ", baseIndent) + ")"
+	if tail := trimTokens(cte[close+1:]); len(tail) > 0 {
+		closing += " " + plainJoin(tail)
+	}
 	if more {
 		closing += ","
 	}

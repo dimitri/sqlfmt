@@ -117,9 +117,19 @@ func formatLineComment(c Token, indent int) []string {
 	if isDashOnly(c.Text) {
 		return []string{strings.Repeat(" ", indent) + c.Text}
 	}
-	content := strings.TrimSpace(strings.TrimPrefix(c.Text, "--"))
+	body := strings.TrimPrefix(c.Text, "--")
+	content := strings.TrimSpace(body)
 	if content == "" {
 		return []string{strings.Repeat(" ", indent) + "--"}
+	}
+	// A comment whose text is itself indented is laid out on purpose --
+	// an EXPLAIN plan sketch, an ASCII diagram, a column of aligned
+	// values -- and reflowing it to the width destroys the only thing it
+	// was communicating. Reflow prose, which starts right after the
+	// "-- "; preserve anything indented further, the same way a dash-only
+	// divider is preserved above.
+	if strings.HasPrefix(body, "  ") {
+		return []string{strings.Repeat(" ", indent) + "--" + strings.TrimRight(body, " \t")}
 	}
 	return wrapWords(strings.Fields(content), indent, "-- ")
 }
@@ -133,6 +143,24 @@ func formatLineComment(c Token, indent int) []string {
 // formatter on its own output is a no-op.
 func formatBlockComment(c Token, indent int) []string {
 	inner := strings.TrimSuffix(strings.TrimPrefix(c.Text, "/*"), "*/")
+	// A comment whose body carries its own "/*" or "*/" is a nested
+	// comment (PostgreSQL nests them), and reflowing it as prose rewrites
+	// those markers -- stripping a leading "*", re-wrapping a line so a
+	// "*/" splits across the break -- which changes where the comment ends
+	// and pulls the SQL after it inside. Its exact bytes are the only
+	// rendering that is guaranteed to still mean the same thing.
+	if strings.Contains(inner, "/*") || strings.Contains(inner, "*/") {
+		pad := strings.Repeat(" ", indent)
+		var out []string
+		for i, l := range strings.Split(c.Text, "\n") {
+			if i == 0 {
+				out = append(out, pad+l)
+				continue
+			}
+			out = append(out, l)
+		}
+		return out
+	}
 	out := []string{strings.Repeat(" ", indent) + "/*"}
 
 	var para []string
@@ -176,22 +204,22 @@ func formatBlockComment(c Token, indent int) []string {
 func wrapWords(words []string, indent int, prefix string) []string {
 	var lines []string
 	var cur []string
-	curLen := indent + len(prefix)
+	curLen := indent + cols(prefix)
 	for _, w := range words {
-		add := len(w)
+		add := cols(w)
 		if len(cur) > 0 {
 			add++ // separating space
 		}
 		if curLen+add > commentWidth && len(cur) > 0 {
 			lines = append(lines, strings.Repeat(" ", indent)+prefix+strings.Join(cur, " "))
 			cur = nil
-			curLen = indent + len(prefix)
+			curLen = indent + cols(prefix)
 		}
 		if len(cur) > 0 {
 			curLen++
 		}
 		cur = append(cur, w)
-		curLen += len(w)
+		curLen += cols(w)
 	}
 	if len(cur) > 0 {
 		lines = append(lines, strings.Repeat(" ", indent)+prefix+strings.Join(cur, " "))
@@ -232,15 +260,15 @@ func alignTrailingComments(text string) string {
 		maxLen := 0
 		for j < len(lines) && strings.Contains(lines[j], commentMarker) {
 			content := strings.SplitN(lines[j], commentMarker, 2)[0]
-			if len(content) > maxLen {
-				maxLen = len(content)
+			if cols(content) > maxLen {
+				maxLen = cols(content)
 			}
 			j++
 		}
 		col := maxLen + 2
 		for k := i; k < j; k++ {
 			parts := strings.SplitN(lines[k], commentMarker, 2)
-			pad := col - len(parts[0])
+			pad := col - cols(parts[0])
 			if pad < 1 {
 				pad = 1
 			}

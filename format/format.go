@@ -84,8 +84,32 @@ func statementKeyword(toks []Token) string {
 		return ""
 	}
 	first := toks[0].Lower
-	if first == "create" && len(toks) > 1 && toks[1].Kind == TokKeyword && toks[1].Lower == "table" {
-		return "create table"
+	if first == "create" || first == "drop" || first == "alter" {
+		// Skip the optional "or replace" / "unique" / "materialized" /
+		// "if not exists" noise between the verb and the object kind.
+		for i := 1; i < len(toks) && i < 6; i++ {
+			if toks[i].Kind != TokKeyword && toks[i].Kind != TokIdent {
+				break
+			}
+			switch toks[i].Lower {
+			case "or", "replace", "unique", "if", "not", "exists", "recursive",
+				"temp", "temporary", "unlogged", "concurrently":
+				continue
+			case "table", "index", "function", "view", "trigger", "statistics",
+				"sequence", "procedure", "materialized", "database":
+				kind := toks[i].Lower
+				if kind == "materialized" {
+					// "create materialized view" lays out as a view.
+					kind = "view"
+				}
+				if first == "create" {
+					return "create " + kind
+				}
+				return first
+			default:
+				return first
+			}
+		}
 	}
 	return first
 }
@@ -127,15 +151,57 @@ func formatStatement(toks []Token) string {
 	var lines []string
 	switch kw {
 	case "begin", "commit", "rollback":
-		lines = []string{flatJoin(body)}
+		lines = flatStatementLines(body)
 	case "create table":
 		lines = layoutCreateTable(body)
+	case "create index", "create function", "create view", "create trigger",
+		"create statistics", "create sequence", "create procedure":
+		// layoutDDL assembles its clause words with flatJoin and has no
+		// place to put a "--" comment, so it dropped them; renderRun
+		// always breaks the line after one. That trade is only worth
+		// making for DDL whose payload is not itself a query -- a CREATE
+		// VIEW's body goes back through the query layout, which handles
+		// comments properly, and handing the whole statement to renderRun
+		// instead flattens a carefully rivered view into one long line.
+		if hasLineComment(body) && !ddlBodyIsQuery(body) {
+			lines = renderRun(body, 0)
+		} else {
+			lines = layoutDDL(body)
+		}
 	case "select", "insert", "update", "delete", "with":
 		lines = formatQuerySegment(body, 0)
+	case "alter":
+		lines = layoutAlter(body)
+	case "prepare":
+		lines = layoutPrepare(body)
+	case "grant", "revoke":
+		if l, ok := layoutIndentedClauses(body, grantClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
+	case "create database":
+		if l, ok := layoutIndentedClauses(body, databaseClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
 	case "explain":
 		lines = layoutExplain(body)
+	case "merge":
+		lines = layoutMerge(body)
+	case "":
+		// A statement that opens with "(" -- the parenthesized arms of a
+		// set operation -- is still a query, and formatQuerySegment knows
+		// how to unwrap it. Anything else with no leading keyword falls
+		// through to the flat default below.
+		if len(body) > 0 && body[0].Text == "(" {
+			lines = formatQuerySegment(body, 0)
+		} else {
+			lines = flatStatementLines(body)
+		}
 	default:
-		lines = []string{flatJoin(body)}
+		lines = flatStatementLines(body)
 	}
 
 	out := strings.Join(lines, "\n")
@@ -146,6 +212,424 @@ func formatStatement(toks []Token) string {
 		}
 	} else if tc := toks[len(toks)-1].TrailingComment; tc != nil {
 		out += commentMarker + trailingCommentText(tc)
+	}
+	return out
+}
+
+// layoutPrepare puts a PREPARE's header on its own line and hands the
+// statement it prepares to the query layout, which is how the corpus
+// writes it:
+//
+//	prepare foo as
+//	 select date, shares, trades, dollars
+//	   from factbook
+//	  where date >= $1::date
+//
+// Without this the whole thing went through flatJoin -- one 144-column
+// line carrying a complete SELECT.
+func layoutPrepare(toks []Token) []string {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 || t.Kind != TokKeyword || t.Lower != "as" {
+			continue
+		}
+		rest := trimTokens(toks[i+1:])
+		if !isQueryStart(rest) {
+			break
+		}
+		head := flatJoin(toks[:i+1])
+		return append([]string{head}, formatQuerySegment(rest, 1)...)
+	}
+	return flatStatementLines(toks)
+}
+
+// flatStatementLines renders a statement the layout has no clause
+// structure for. That is normally one flat line, but a "--" comment in the
+// middle of the run cannot share a line with the tokens after it, so the
+// run keeps the line breaks renderRun put in for it.
+func flatStatementLines(body []Token) []string {
+	if hasLineComment(body) {
+		return renderRun(body, 0)
+	}
+	return []string{flatJoin(body)}
+}
+
+// ddlClauseWords are the keywords that introduce a continuation clause in
+// the DDL statements layoutDDL handles. Order matters only for the two-word
+// entries, which must precede any single-word entry sharing their first
+// word.
+var ddlClauseWords = []struct {
+	words []string
+	name  string
+}{
+	{[]string{"security", "definer"}, "security definer"},
+	{[]string{"security", "invoker"}, "security invoker"},
+	{[]string{"returns"}, "returns"},
+	{[]string{"language"}, "language"},
+	{[]string{"using"}, "using"},
+	{[]string{"include"}, "include"},
+	{[]string{"tablespace"}, "tablespace"},
+	{[]string{"where"}, "where"},
+	{[]string{"from"}, "from"},
+	{[]string{"on"}, "on"},
+	{[]string{"as"}, "as"},
+	{[]string{"immutable"}, "immutable"},
+	{[]string{"stable"}, "stable"},
+	{[]string{"volatile"}, "volatile"},
+	{[]string{"strict"}, "strict"},
+	{[]string{"parallel"}, "parallel"},
+	{[]string{"cost"}, "cost"},
+	{[]string{"execute"}, "execute"},
+	{[]string{"for"}, "for"},
+	{[]string{"before"}, "before"},
+	{[]string{"after"}, "after"},
+}
+
+// layoutDDL renders CREATE FUNCTION / INDEX / VIEW / TRIGGER / STATISTICS
+// and friends. Everything except CREATE TABLE used to fall through
+// formatStatement's default arm to flatJoin, which put the whole header on
+// one line -- a hand-written four-line CREATE FUNCTION header came back at
+// 138 columns, and 47 CREATE INDEX statements lost their line breaks.
+//
+// The shape is the one the rest of the tool uses: the object being created
+// stays on the first line, and each continuation clause goes on its own
+// line, right-padded so the clause keywords end at a common column -- a
+// river, computed over the continuation clauses only. The "create ..."
+// line is deliberately not part of that river: it carries the object name
+// and argument list and is routinely 40+ characters, which would push every
+// other line off the page.
+func layoutDDL(toks []Token) []string {
+	bounds := ddlClauseBounds(toks)
+	if len(bounds) == 0 {
+		return []string{flatJoin(toks)}
+	}
+	// A view is its query: "create view v as" on one line, then the query
+	// laid out as it would be on its own. Running it through the clause
+	// river below would put "as" on a line of its own and leave the query
+	// flat beside it.
+	if last := bounds[len(bounds)-1]; last.name == "as" && len(bounds) == 1 {
+		body := trimTokens(toks[last.idx+1:])
+		if isQueryStart(body) {
+			head := flatJoin(toks[:last.idx]) + " as"
+			return append([]string{head}, strings.Split(formatStatement(body), "\n")...)
+		}
+	}
+	head := flatJoin(toks[:bounds[0].idx])
+	if cols(head)+1+cols(flatJoin(toks[bounds[0].idx:])) <= targetWidth {
+		return []string{flatJoin(toks)}
+	}
+
+	width := 0
+	for _, b := range bounds {
+		if len(b.name) > width {
+			width = len(b.name)
+		}
+	}
+
+	// Resolve each clause's body span first: hoistLanguage reorders the
+	// clauses, and a clause's span is defined by where the *next* one
+	// starts in the source, not in the output.
+	clauses := make([]ddlClause, 0, len(bounds))
+	clauseToks := make([][]Token, 0, len(bounds))
+	for bi, b := range bounds {
+		end := len(toks)
+		if bi+1 < len(bounds) {
+			end = bounds[bi+1].idx
+		}
+		clauses = append(clauses, ddlClause{b.name, flatJoin(toks[b.idx+len(b.words) : end])})
+		clauseToks = append(clauseToks, toks[b.idx+len(b.words):end])
+	}
+	clauses = hoistLanguage(clauses)
+	clauses = formatSQLBody(clauses)
+
+	// The head can overflow on its own -- "create statistics name (kind,
+	// kind, ...)" carries a list too -- and gets the same treatment.
+	headLines := []string{head}
+	if cols(head) > targetWidth {
+		if filled, ok := ddlFillBody(toks[:bounds[0].idx], 0); ok {
+			headLines = filled
+		}
+	}
+	lines := headLines
+	for ci, c := range clauses {
+		prefix := strings.Repeat(" ", width-len(c.name)) + c.name
+		if c.body == "" {
+			lines = append(lines, prefix)
+			continue
+		}
+		if cols(prefix)+1+cols(c.body) > targetWidth && ci < len(clauseToks) {
+			// An index's column list or a statistics kind list is
+			// call-shaped -- "using btree(a, b, ...)" -- so renderRun's
+			// paren handling leaves it alone per rule 4, and a wide one
+			// overflows. Only the clause knows it is a list, so fill it
+			// here, the same way the INSERT column list is filled.
+			if filled, ok := ddlFillBody(clauseToks[ci], len(prefix)+1); ok {
+				lines = append(lines, prefix+" "+filled[0])
+				lines = append(lines, filled[1:]...)
+				continue
+			}
+		}
+		lines = append(lines, prefix+" "+c.body)
+	}
+	return lines
+}
+
+// formatSQLBody reformats a LANGUAGE SQL function body. The body of such a
+// function is SQL, and this package formats SQL, so there is no reason to
+// leave it as whatever the author typed while every other statement in the
+// file gets laid out.
+//
+// LANGUAGE SQL bodies go through Format; LANGUAGE PLPGSQL bodies go
+// through FormatPlpgsql. Every other language -- plpython, plperl, plv8 --
+// is passed through verbatim, which is the only safe answer: the lexer
+// treats a dollar-quoted body as a single opaque token, so a body this
+// package does not understand is preserved exactly as written.
+func formatSQLBody(clauses []ddlClause) []ddlClause {
+	lang := ""
+	for _, c := range clauses {
+		if c.name == "language" {
+			lang = strings.ToLower(strings.TrimSpace(c.body))
+		}
+	}
+	if lang != "sql" && lang != "plpgsql" {
+		return clauses
+	}
+	out := make([]ddlClause, len(clauses))
+	copy(out, clauses)
+	for i, c := range out {
+		if c.name != "as" {
+			continue
+		}
+		tag, inner, ok := SplitDollarQuoted(strings.TrimSpace(c.body))
+		if !ok {
+			continue
+		}
+		var formatted string
+		if lang == "plpgsql" {
+			pl, pok := FormatPlpgsql(inner, 0)
+			if !pok {
+				continue // not a skeleton we recognise: leave it alone
+			}
+			// Only rewrite when it is an improvement. A PL/pgSQL body is
+			// mostly embedded SQL, and a construct the SQL layout handles
+			// poorly -- a SET with several CASE expressions, say -- can
+			// come back wider and more ragged than the author's own
+			// version. The author's version is then the better answer, and
+			// leaving it is always correct.
+			// The guard is here to catch pathological output -- a
+			// construct the SQL layout cascades into a staircase running
+			// well past the page -- not to enforce rule 17, which is a
+			// soft target. Indentation legitimately lengthens lines, and a
+			// body that lands a column or two over the target is still far
+			// better than an unformatted one, so the comparison is against
+			// the author's own longest line plus a tolerance for the
+			// indentation this adds.
+			if maxLineLen(pl) > maxLineLen(inner)+plBodyTolerance {
+				continue
+			}
+			formatted = pl
+		} else {
+			f, err := Format(strings.NewReader(inner))
+			if err != nil {
+				continue // unparseable body: leave it exactly as written
+			}
+			formatted = f
+		}
+		out[i].body = tag + "\n" + strings.TrimRight(formatted, "\n") + "\n" + tag
+	}
+	return out
+}
+
+// plBodyTolerance is how much longer than the author's own longest line a
+// formatted PL/pgSQL body may be before it is rejected as worse than what
+// it replaces -- roughly the indentation a couple of nested blocks add.
+const plBodyTolerance = 8
+
+// maxLineLen returns the length of the longest line in s.
+func maxLineLen(s string) int {
+	m := 0
+	for _, l := range strings.Split(s, "\n") {
+		if len(l) > m {
+			m = len(l)
+		}
+	}
+	return m
+}
+
+// ddlClause is one rendered continuation clause: its keyword and the text
+// that follows it.
+type ddlClause struct{ name, body string }
+
+// ddlFillBody fills a DDL clause body that does not fit: either a trailing
+// parenthesized list ("using btree(a, b, ...)", "on t (a, b, ...)") or a
+// bare comma list ("on isocode, class, feature"). Reports false when there
+// is no list to fill, or when filling would not help.
+func ddlFillBody(toks []Token, col int) ([]string, bool) {
+	toks = trimTokens(toks)
+	if len(toks) == 0 {
+		return nil, false
+	}
+	if toks[len(toks)-1].Text == ")" {
+		open := -1
+		depth := 0
+		for i := len(toks) - 1; i >= 0; i-- {
+			switch toks[i].Text {
+			case ")":
+				depth++
+			case "(":
+				depth--
+				if depth == 0 {
+					open = i
+				}
+			}
+			if open >= 0 {
+				break
+			}
+		}
+		if open >= 0 {
+			head := plainJoin(toks[:open])
+			filled, ok := fillCommaList(toks[open+1:len(toks)-1], col+len(head)+1)
+			if !ok {
+				return nil, false
+			}
+			filled[0] = head + "(" + filled[0]
+			filled[len(filled)-1] += ")"
+			return filled, true
+		}
+	}
+	return fillCommaList(toks, col)
+}
+
+// hoistLanguage moves a LANGUAGE clause that trails the body back into the
+// header, ahead of AS. PostgreSQL accepts a function's option list in any
+// order, so "as $$ ... $$ language plpgsql" is legal and common -- but it
+// buries the single most useful fact about a function, what language it is
+// written in, behind however many hundred lines its body runs to. Reading
+// the declaration should not require scrolling past the implementation.
+// Reordering options changes nothing about what the statement does.
+func hoistLanguage(clauses []ddlClause) []ddlClause {
+	asAt, langAt := -1, -1
+	for i, c := range clauses {
+		switch c.name {
+		case "as":
+			if asAt == -1 {
+				asAt = i
+			}
+		case "language":
+			langAt = i
+		}
+	}
+	if asAt == -1 || langAt == -1 || langAt < asAt {
+		return clauses
+	}
+	out := make([]ddlClause, 0, len(clauses))
+	out = append(out, clauses[:asAt]...)
+	out = append(out, clauses[langAt])
+	for i := asAt; i < len(clauses); i++ {
+		if i != langAt {
+			out = append(out, clauses[i])
+		}
+	}
+	return out
+}
+
+// isQueryStart reports whether toks begins a query -- the payload of a
+// CREATE VIEW or a CREATE TABLE ... AS.
+// ddlBodyIsQuery reports whether a DDL statement carries a query as its
+// payload -- "create view v as select ...", "create table t as with ...".
+func ddlBodyIsQuery(toks []Token) bool {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth == 0 && t.Kind == TokKeyword && t.Lower == "as" && isQueryStart(toks[i+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isQueryStart(toks []Token) bool {
+	if len(toks) == 0 || toks[0].Kind != TokKeyword {
+		return false
+	}
+	switch toks[0].Lower {
+	case "select", "with", "values", "table":
+		return true
+	}
+	return false
+}
+
+// matchDDLWords is matchWords without the TokKeyword requirement. Several
+// DDL clause introducers -- BEFORE, AFTER, EXECUTE, RETURNS, INCLUDE,
+// TABLESPACE -- are not in the lexer's keyword table and lex as plain
+// identifiers, but in this position they are unambiguously clause
+// keywords.
+func matchDDLWords(toks []Token, i int, words []string) bool {
+	for j, w := range words {
+		if i+j >= len(toks) || toks[i+j].Lower != w {
+			return false
+		}
+	}
+	return true
+}
+
+type ddlBound struct {
+	idx   int
+	name  string
+	words []string
+}
+
+// ddlClauseBounds finds each top-level DDL continuation clause. A clause
+// keyword inside parentheses (a column list, an argument list, an index
+// expression) belongs to that construct, not to the statement.
+func ddlClauseBounds(toks []Token) []ddlBound {
+	var out []ddlBound
+	depth := 0
+	for i := 0; i < len(toks); i++ {
+		switch toks[i].Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		for _, cw := range ddlClauseWords {
+			if matchDDLWords(toks, i, cw.words) {
+				out = append(out, ddlBound{idx: i, name: cw.name, words: cw.words})
+				if cw.name == "as" {
+					// AS introduces the payload. A dollar-quoted function
+					// body is a single token, so scanning can resume after
+					// it -- that is where a trailing LANGUAGE clause lives.
+					// A view's payload is a query, which has FROM/AS/ON of
+					// its own: continuing to scan chopped the SELECT up at
+					// its own clause keywords and dropped most of it.
+					if i+1 < len(toks) && toks[i+1].Kind == TokDollarString {
+						i++
+						break
+					}
+					return out
+				}
+				i += len(cw.words) - 1
+				break
+			}
+		}
 	}
 	return out
 }
@@ -254,22 +738,63 @@ func explainPayloadJoinsRiver(rest []Token) bool {
 // left-padded to a common width so data types start in the same column,
 // table-level constraints separated by a blank line, closing ")" at the
 // opening "("'s indent.
-func layoutCreateTable(toks []Token) []string {
-	open := -1
+// createTableColumnList returns the index of the "(" opening a CREATE
+// TABLE's column list, or -1 when the statement has none. The column list
+// is the first "(" that follows the table name directly; anything with a
+// keyword in between ("partition of t for values from (", "as select ... (")
+// is some other construct's paren, and treating it as the column list
+// mangled the statement and dropped everything after it.
+func createTableColumnList(toks []Token) int {
 	for i, t := range toks {
-		if t.Text == "(" {
-			open = i
-			break
+		if t.Text != "(" {
+			continue
+		}
+		for j := 2; j < i; j++ {
+			// "of" belongs to the table's name -- "create table rate of
+			// rate_t (...)" is a typed table and still has a column list.
+			// "partition" deliberately stays disallowed, so a partition
+			// definition falls through to its own clause layout.
+			if toks[j].Kind == TokKeyword && toks[j].Lower != "if" &&
+				toks[j].Lower != "not" && toks[j].Lower != "exists" &&
+				toks[j].Lower != "of" {
+				return -1
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+// createTableAsBody returns the index of the statement a CREATE TABLE ... AS
+// wraps, or -1 if this is not a CTAS. The wrapped statement is then
+// formatted as it would be on its own.
+func createTableAsBody(toks []Token) int {
+	for i, t := range toks {
+		if t.Kind == TokKeyword && t.Lower == "as" && i+1 < len(toks) {
+			return i + 1
 		}
 	}
+	return -1
+}
+
+func layoutCreateTable(toks []Token) []string {
+	open := createTableColumnList(toks)
 	if open == -1 {
-		return []string{flatJoin(toks)}
+		if l, ok := layoutIndentedClauses(toks, partitionClauses, 2); ok {
+			return l
+		}
+		if body := createTableAsBody(toks); body != -1 {
+			head := flatStatementLines(toks[:body])
+			return append(head, strings.Split(formatStatement(toks[body:]), "\n")...)
+		}
+		return flatStatementLines(toks)
 	}
 	header := flatJoin(toks[:open])
 	close := matchParen(toks, open)
 	items := splitTopLevelComma(trimTokens(toks[open+1 : close]))
 
-	constraintKws := map[string]bool{"primary": true, "unique": true, "check": true, "constraint": true, "foreign": true}
+	constraintKws := map[string]bool{"primary": true, "unique": true, "check": true,
+		"constraint": true, "foreign": true, "exclude": true}
 	isConstraint := func(it []Token) bool {
 		it = trimTokens(it)
 		return len(it) > 0 && it[0].Kind == TokKeyword && constraintKws[it[0].Lower]
@@ -281,8 +806,8 @@ func layoutCreateTable(toks []Token) []string {
 		if len(it) == 0 || isConstraint(it) {
 			continue
 		}
-		if len(it[0].Text) > maxName {
-			maxName = len(it[0].Text)
+		if cols(it[0].Text) > maxName {
+			maxName = cols(it[0].Text)
 		}
 	}
 
@@ -297,21 +822,49 @@ func layoutCreateTable(toks []Token) []string {
 		if idx == len(items)-1 {
 			comma = ""
 		}
+		// Peeled before flatJoin/renderRun, both of which consume the
+		// metadata: the comma separating two columns is part of the
+		// statement and has to be emitted before the comment, not after
+		// it. Appending it to renderRun's output put the comma inside the
+		// comment -- "bigserial primary key -- the key," -- which is a
+		// syntax error, and left renderRun's post-comment line break
+		// behind as a stray blank line.
+		trailing := trailingCommentSuffix(it)
 		if isConstraint(it) {
 			if prevWasColumn {
 				lines = append(lines, "")
 			}
-			lines = append(lines, "  "+flatJoin(it)+comma)
+			// A wide constraint breaks the way the corpus writes it, with
+			// REFERENCES a step further in than the key it qualifies.
+			// flatJoin alone left "foreign key (a, b, c) references
+			// t(a, b, c)" on one 97-column line.
+			flat := flatJoin(it)
+			if cols(flat)+2+cols(comma) > targetWidth {
+				if l, ok := layoutRiverClauses(it, constraintClauses, 2); ok && len(l) > 1 {
+					l[len(l)-1] += comma + trailing
+					lines = append(lines, l...)
+					prevWasColumn = false
+					continue
+				}
+			}
+			lines = append(lines, "  "+flat+comma+trailing)
 			prevWasColumn = false
 			continue
 		}
 		name := it[0].Text
 		rest := renderRun(trimTokens(it[1:]), 2+maxName+1)
-		pad := strings.Repeat(" ", maxName-len(name))
-		lines = append(lines, "  "+name+pad+" "+rest[0]+comma)
+		pad := strings.Repeat(" ", maxName-cols(name))
+		lines = append(lines, "  "+name+pad+" "+rest[0]+comma+trailing)
 		lines = append(lines, rest[1:]...)
 		prevWasColumn = true
 	}
-	lines = append(lines, ")")
+	// Whatever follows the column list belongs to the statement and must
+	// not be dropped: PARTITION BY, INHERITS, TABLESPACE, WITH (...), the
+	// lot. Losing it silently turned a partitioned table into a plain one.
+	closing := ")"
+	if tail := trimTokens(toks[close+1:]); len(tail) > 0 {
+		closing += " " + flatJoin(tail)
+	}
+	lines = append(lines, closing)
 	return lines
 }

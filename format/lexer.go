@@ -62,12 +62,37 @@ var keywords = buildKeywordSet([]string{
 	"primary", "key", "unique", "check", "references", "default",
 	"begin", "commit", "rollback", "transaction",
 	"over", "partition", "window", "rows", "range", "unbounded",
+	// The aggregate suffixes. Without them "count(*) FILTER (WHERE ...)"
+	// came out as "count(*) FILTER(where ...)" and "WITHIN GROUP" as
+	// "WITHIN group" -- rule 1 lowercasing half of each construct because
+	// only its second word was in this table.
+	"filter", "within",
 	"preceding", "following", "current", "row",
 	"grouping", "sets", "cube", "rollup",
 	"cast", "language", "function", "returns", "true", "false",
 	"lateral", "only", "of", "to", "for",
 	"conflict", "do", "nothing", "constraint", "foreign", "materialized",
 	"explain",
+	// DDL words, so rule 1 lowercases them consistently: without these a
+	// CREATE TRIGGER came out as "create TRIGGER ... for EACH row", with
+	// the words in the keyword table lowercased and the rest left as
+	// typed. "cost" is deliberately omitted -- far too plausible a column
+	// name to start treating as a keyword.
+	"trigger", "procedure", "each", "after", "before", "execute", "returns",
+	"index", "view", "statistics", "sequence", "include", "tablespace",
+	"merge", "matched", "source", "target",
+	"immutable", "stable", "volatile", "strict", "parallel", "security",
+	"definer", "invoker", "concurrently", "unlogged", "inherits",
+	// The ALTER/GRANT/CREATE DATABASE vocabulary, for the same reason:
+	// without it "ALTER TABLE t ATTACH PARTITION p" came back as
+	// "alter table t ATTACH partition p", and "GRANT SELECT" as
+	// "GRANT select" -- rule 1 lowercasing whichever word of the pair
+	// already happened to be in this table.
+	"prepare", "deallocate",
+	"attach", "detach", "validate", "rename", "add", "column",
+	"privileges", "database", "encoding", "owner", "grant", "revoke",
+	"template", "cascade", "restrict", "role", "usage", "tables",
+	"sequences", "routines", "extension", "enable", "disable",
 })
 
 func buildKeywordSet(words []string) map[string]bool {
@@ -204,6 +229,16 @@ func (l *lexer) scanToken() (Token, error) {
 	switch {
 	case b == '\'':
 		return l.scanString()
+	case isStringPrefix(b) && l.peekAt(1) == '\'':
+		// E'...', B'...', X'...' and U&'...': the prefix is part of the
+		// literal and must stay glued to the opening quote. Lexed as a
+		// bare identifier followed by a string, spaceBetween put a space
+		// between them -- and "E '\n'" is not valid PostgreSQL at all
+		// ("type \"e\" does not exist"), so the formatter was emitting SQL
+		// that does not parse.
+		return l.scanPrefixedString()
+	case (b == 'u' || b == 'U') && l.peekAt(1) == '&' && l.peekAt(2) == '\'':
+		return l.scanPrefixedString()
 	case b == '"':
 		return l.scanQuotedIdent()
 	case b == '$':
@@ -233,16 +268,56 @@ func (l *lexer) scanToken() (Token, error) {
 	}
 }
 
-func isDigit(b byte) bool      { return b >= '0' && b <= '9' }
-func isAlpha(b byte) bool      { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' }
-func isIdentStart(b byte) bool { return isAlpha(b) }
-func isIdentCont(b byte) bool  { return isAlpha(b) || isDigit(b) || b == '$' }
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
+func isAlpha(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_' }
+
+// isHigh reports whether b has its high bit set, i.e. is one byte of a
+// multi-byte UTF-8 sequence. PostgreSQL puts that whole range in its
+// identifier character classes -- scan.l has
+//
+//	ident_start	[A-Za-z\200-\377_]
+//	ident_cont	[A-Za-z\200-\377_0-9\$]
+//
+// and the same for dollar-quote tags (dolq_start/dolq_cont) -- so an
+// accented identifier like "prenom" spelled with an e-acute is one token,
+// not one token per byte. Scanning those bytes individually turned
+// "prenom" into "pr <byte> <byte> nom", which is data loss in the plainest
+// sense: the output is no longer the input.
+func isHigh(b byte) bool { return b >= 0x80 }
+
+func isIdentStart(b byte) bool { return isAlpha(b) || isHigh(b) }
+func isIdentCont(b byte) bool  { return isAlpha(b) || isDigit(b) || isHigh(b) || b == '$' }
 func isPunct(b byte) bool {
 	switch b {
 	case '(', ')', '[', ']', ',', ';':
 		return true
 	}
 	return false
+}
+
+// isStringPrefix reports whether b introduces a prefixed string literal.
+func isStringPrefix(b byte) bool {
+	switch b {
+	case 'e', 'E', 'b', 'B', 'x', 'X':
+		return true
+	}
+	return false
+}
+
+// scanPrefixedString scans E'...', B'...', X'...' or U&'...' as one token,
+// prefix included.
+func (l *lexer) scanPrefixedString() (Token, error) {
+	start := l.pos
+	l.advance() // the prefix letter
+	if l.peekByte() == '&' {
+		l.advance()
+	}
+	str, err := l.scanString()
+	if err != nil {
+		return Token{}, err
+	}
+	text := string(l.src[start:l.pos])
+	return Token{Kind: str.Kind, Text: text, Lower: text}, nil
 }
 
 func (l *lexer) scanString() (Token, error) {
@@ -328,6 +403,44 @@ func (l *lexer) scanDollarString() (Token, error) {
 	}
 	text := string(l.src[start:l.pos])
 	return Token{Kind: TokDollarString, Text: text, Lower: text}, nil
+}
+
+// SplitDollarQuoted splits a dollar-quoted string literal into its
+// delimiter and its body: "$tag$body$tag$" -> ("$tag$", "body", true). It
+// reports false for anything that is not exactly one complete dollar-quoted
+// string.
+//
+// The delimiter rules are the lexer's own (isDollarQuoteStart /
+// scanDollarString), which are PostgreSQL's: an opening "$", an optional
+// identifier tag, a closing "$", and a body that runs to the next
+// occurrence of that same delimiter. Both body formatters -- LANGUAGE SQL
+// and PL/pgSQL -- go through this rather than hand-parsing, because
+// PostgreSQL uses one lexer for dollar quoting regardless of the language
+// inside, and a formatter that guessed differently in either place would
+// mis-split a body whose text contains a "$".
+func SplitDollarQuoted(s string) (delim, body string, ok bool) {
+	if !isDollarQuoteStart([]byte(s), 0) {
+		return "", "", false
+	}
+	i := 1
+	for i < len(s) && isIdentCont(s[i]) && s[i] != '$' {
+		i++
+	}
+	if i >= len(s) || s[i] != '$' {
+		return "", "", false
+	}
+	delim = s[:i+1]
+	rest := s[len(delim):]
+	end := strings.Index(rest, delim)
+	if end < 0 {
+		return "", "", false
+	}
+	// Exactly one dollar-quoted string: nothing may follow the closing
+	// delimiter, or this is a body with trailing options we must not touch.
+	if len(rest) != end+len(delim) {
+		return "", "", false
+	}
+	return delim, rest[:end], true
 }
 
 func (l *lexer) scanParam() (Token, error) {

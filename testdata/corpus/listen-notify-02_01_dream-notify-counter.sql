@@ -1,6 +1,9 @@
 begin;
 
-create or replace function twcache.tg_notify_counters() returns trigger language plpgsql as $$
+create or replace function twcache.tg_notify_counters()
+ returns trigger
+language plpgsql
+      as $$
 declare
   channel text := TG_ARGV[0];
 begin
@@ -30,6 +33,10 @@ begin
 end;
 $$;
 
-create TRIGGER notify_counters AFTER insert on tweet.activity for EACH row EXECUTE PROCEDURE twcache.tg_notify_counters('tweet.activity');
+create trigger notify_counters
+  after insert
+     on tweet.activity
+    for each row
+execute procedure twcache.tg_notify_counters('tweet.activity');
 
 commit;
