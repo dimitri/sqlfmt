@@ -272,7 +272,14 @@ fixture's current content.
     (`primary key(...)`, `unique(...)`, `check(...)`) from the column list
     with one blank line. Closing `)` on its own line at the opening `(`'s
     indent, then `;`. Collapse to one line only for genuinely trivial tables
-    that fit under the line-length target (rule 17).
+    that fit under the line-length target (rule 17). A table constraint too
+    wide for one line puts its `REFERENCES` (and any `ON DELETE` / `CHECK` /
+    `DEFERRABLE`) on the next line, right-aligned against the constraint's
+    own keyword so both values start in the same column:
+    ```sql
+      foreign key (isocode, regcode, discode)
+       references geoname.district(isocode, regcode, discode)
+    ```
 
 17. **Line length**: soft target ≈ 78–80 characters, not hard-enforced
     (measured: only 2.5% of 3887 corpus lines exceed 70 chars, only 16
@@ -356,6 +363,57 @@ fixture's current content.
     anything starting with `WITH` (whose CTE list has a layout of its own,
     rule 13). Those keep an unpadded `EXPLAIN` line followed by the
     statement formatted as it would be on its own.
+
+20. **Breaking an expression at a binary operator**: when a value
+    expression is too wide, break at its loosest-binding top-level
+    operator — `||` first, then the JSON/containment operators, then
+    `+`/`-`, then `*`/`/`/`%`. The operator hangs into the gutter *left* of
+    the operands and every operand starts in the same column, the way
+    `AND`/`OR` sit under `WHERE`:
+    ```sql
+    select a_long_column_name
+        || '--------------------------'
+        || b_long_column
+    ```
+    Comparison operators (`=`, `<>`, `<` …) are break points in a
+    condition — a `WHERE`, a `JOIN … ON` — but not in a value: an
+    `UPDATE`'s `set x = case … end` is an assignment, and breaking at its
+    `=` gives the column a line of its own. `AND`/`OR` are never expression
+    break points; they belong to the clause river (rules 10, 9).
+    `BETWEEN … AND` breaks before `BETWEEN`, its `AND` being part of the
+    operator. Adjacent string literals are an implicit concatenation and
+    break like an operator with no symbol.
+
+21. **Aggregate `FILTER` / `WITHIN GROUP`**: short stays inline. Too wide,
+    the suffix takes its own line, right-aligned against the aggregate so
+    both argument lists start in the same column — the measure runs
+    *through* the open paren, since `within group (` carries a space before
+    its paren and `count(` does not:
+    ```sql
+            count(*)
+           filter(where milliseconds is null) as dnfs,
+           percentile_cont(array[0.5, 0.99])
+             within group (order by cts - ats) as parr
+    ```
+    `OVER` is not treated this way: a window frame has its own internal
+    clauses and keeps the layout in rule 14.
+
+22. **Statement-level DDL beyond `CREATE TABLE`**: `ALTER TABLE`,
+    `GRANT`/`REVOKE`, `CREATE DATABASE`, `ALTER DEFAULT PRIVILEGES` and a
+    partition definition each keep their header on the first line and put
+    one continuation clause per line, indented 2 — not rivered, their
+    clause keywords being too unlike in length for that to read well:
+    ```sql
+    create table lab.invoice_2022        alter table chinook.invoice
+      partition of lab.invoice_by_year     add constraint invoice_currency_notnull
+      for values from (2022) to (2023);        check (currency is not null)
+                                               not valid;
+    ```
+    A statement that fits stays whole: a clause word opening the statement
+    is not a continuation. One `ALTER TABLE` subcommand too wide by itself
+    breaks its own inner clauses under it at indent 6. `PREPARE` puts its
+    header on a line and hands the statement it prepares to the query
+    layout.
 
 ## Summary of genuinely ambiguous areas
 
