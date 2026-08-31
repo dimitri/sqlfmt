@@ -439,6 +439,57 @@ func isUnaryContext(prevPrev *Token) bool {
 // It reports ok=false when filling cannot help: if col is already so deep
 // that even a single item overflows, breaking the list only adds ragged
 // lines to an over-long one, and the caller should leave it alone.
+// layoutConcatChain breaks an over-wide expression at its top-level "||"
+// operators, each continuation line starting with the operator so the
+// chain stays legible:
+//
+//	format('...', a, b)
+//	|| E'\n'
+//	|| format('...', c, d)
+//
+// Reports false when there is no top-level "||", or when breaking there
+// would not bring the line back under the target.
+func layoutConcatChain(toks []Token, startCol int) ([]string, bool) {
+	parts := splitTopLevelConcat(trimTokens(toks))
+	if len(parts) < 2 {
+		return nil, false
+	}
+	lines := make([]string, 0, len(parts))
+	for i, part := range parts {
+		pl := renderRun(trimTokens(part), startCol+3)
+		if i == 0 {
+			lines = append(lines, pl[0])
+		} else {
+			lines = append(lines, strings.Repeat(" ", startCol)+"|| "+pl[0])
+		}
+		lines = append(lines, pl[1:]...)
+	}
+	return lines, true
+}
+
+// splitTopLevelConcat splits a token run at its top-level "||" operators.
+func splitTopLevelConcat(toks []Token) [][]Token {
+	var out [][]Token
+	depth, start := 0, 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		case "||":
+			if depth == 0 {
+				out = append(out, toks[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return append(out, toks[start:])
+}
+
 // layoutValuesRow fills a single, over-wide VALUES row across lines.
 // Reports false for anything else -- several rows, or a row that fits.
 func layoutValuesRow(body []Token, bodyCol int) ([]string, bool) {
@@ -1081,6 +1132,16 @@ func layoutCommaList(toks []Token, startCol int) []string {
 		lead := leadingCommentLines(it, startCol)
 		trailing := trailingCommentSuffix(it)
 		itLines := renderRun(it, startCol)
+		// A single select-list item can be far too wide with no comma in
+		// it to break at -- the figure-generating queries build TikZ as one
+		// long "format(...) || E'\n' || format(...)" chain. The "||"
+		// operators are the natural break, and are where the author breaks
+		// them by hand.
+		if len(itLines) == 1 && startCol+len(itLines[0]) > targetWidth {
+			if cl, ok := layoutConcatChain(it, startCol); ok {
+				itLines = cl
+			}
+		}
 		if idx < len(items)-1 {
 			// The separating comma belongs on the item's own last rendered
 			// line, not necessarily its first -- an item that itself wraps

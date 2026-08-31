@@ -40,11 +40,17 @@ roads as (
 ),
 layers as (
     select 1 as z,
-           '<path d="' || st_assvg(geom, 0, 1) || '" fill="none" stroke="#C0B8AE" stroke-width="2"/>' as elem
+           '<path d="'
+           || st_assvg(geom, 0, 1)
+           || '" fill="none" stroke="#C0B8AE" stroke-width="2"/>' as elem
       from roads
     union all
     select 2,
-           '<circle cx="' || (((pt)[0] - proj.x0) * proj.scale)::text || '" cy="' || (-(((pt)[1] - proj.y0) * proj.scale))::text || '" r="9" fill="#B04020" stroke="#F2EFE9" stroke-width="2"/>' as elem
+           '<circle cx="'
+           || (((pt)[0] - proj.x0) * proj.scale)::text
+           || '" cy="'
+           || (-(((pt)[1] - proj.y0) * proj.scale))::text
+           || '" r="9" fill="#B04020" stroke="#F2EFE9" stroke-width="2"/>' as elem
       from search, proj
     union all
     select 3,
@@ -53,6 +59,21 @@ layers as (
     case when rn % 2 = 0 then 9 else -4 end))::text || '" font-size="13" fill="#2C2820">' || replace(replace(name, '&', '&amp;'), '<', '&lt;') || '</text>' as elem
       from nearest, proj
 )
-  select '<svg viewBox="0 ' || (-((proj.y1 - proj.y0) * proj.scale)) || ' ' || ((proj.x1 - proj.x0) * proj.scale) || ' ' || ((proj.y1 - proj.y0) * proj.scale) || '" xmlns="http://www.w3.org/2000/svg">' || '<rect x="0" y="' || (-((proj.y1 - proj.y0) * proj.scale)) || '" width="' || ((proj.x1 - proj.x0) * proj.scale) || '" height="' || ((proj.y1 - proj.y0) * proj.scale) || '" fill="#F2EFE9"/>' || string_agg(layers.elem, '' order by layers.z) || '</svg>' as svg
+  select '<svg viewBox="0 '
+         || (-((proj.y1 - proj.y0) * proj.scale))
+         || ' '
+         || ((proj.x1 - proj.x0) * proj.scale)
+         || ' '
+         || ((proj.y1 - proj.y0) * proj.scale)
+         || '" xmlns="http://www.w3.org/2000/svg">'
+         || '<rect x="0" y="'
+         || (-((proj.y1 - proj.y0) * proj.scale))
+         || '" width="'
+         || ((proj.x1 - proj.x0) * proj.scale)
+         || '" height="'
+         || ((proj.y1 - proj.y0) * proj.scale)
+         || '" fill="#F2EFE9"/>'
+         || string_agg(layers.elem, '' order by layers.z)
+         || '</svg>' as svg
     from layers, proj
 group by proj.x0, proj.y0, proj.x1, proj.y1, proj.scale;

@@ -113,3 +113,31 @@ func TestMergeIdempotent(t *testing.T) {
 		t.Errorf("not idempotent:\nfirst:\n%s\nsecond:\n%s", once, twice)
 	}
 }
+
+// TestConcatChainBreaks: a single select-list item can be far too wide with
+// no comma in it to break at -- the figure-generating queries build TikZ as
+// one long "format(...) || E'\n' || format(...)" chain. The "||" operators
+// are the natural break, and are where the author breaks them by hand.
+func TestConcatChainBreaks(t *testing.T) {
+	src := "select '<path d=\"' || st_assvg(geom, 0, 1) || '\" fill=\"none\" stroke=\"#C0B8AE\" stroke-width=\"2\"/>' as elem from shapes;"
+	got := mFmt(t, src)
+	if squash(got) != squash(src) {
+		t.Errorf("content changed:\n%s", got)
+	}
+	if !strings.Contains(got, "\n       || st_assvg(geom, 0, 1)\n") {
+		t.Errorf("chain not broken at ||:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if len(l) > 90 {
+			t.Errorf("line over 90 columns:\n%s", l)
+		}
+	}
+}
+
+// TestShortConcatStaysInline: the break is width-driven.
+func TestShortConcatStaysInline(t *testing.T) {
+	got := mFmt(t, "select a || b || c as x from t;")
+	if strings.Contains(got, "|| b\n") {
+		t.Errorf("short concat was broken up:\n%s", got)
+	}
+}
