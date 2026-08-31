@@ -278,10 +278,11 @@ func layoutDDL(toks []Token) []string {
 // leave it as whatever the author typed while every other statement in the
 // file gets laid out.
 //
-// Only "language sql" is touched. Every other language -- plpgsql, plpython,
-// plperl -- is passed through verbatim, which is both the existing behaviour
-// and the only safe one: the lexer treats a dollar-quoted body as a single
-// opaque token, so a body it does not understand is preserved exactly.
+// LANGUAGE SQL bodies go through Format; LANGUAGE PLPGSQL bodies go
+// through FormatPlpgsql. Every other language -- plpython, plperl, plv8 --
+// is passed through verbatim, which is the only safe answer: the lexer
+// treats a dollar-quoted body as a single opaque token, so a body this
+// package does not understand is preserved exactly as written.
 func formatSQLBody(clauses []ddlClause) []ddlClause {
 	lang := ""
 	for _, c := range clauses {
@@ -289,7 +290,7 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 			lang = strings.ToLower(strings.TrimSpace(c.body))
 		}
 	}
-	if lang != "sql" {
+	if lang != "sql" && lang != "plpgsql" {
 		return clauses
 	}
 	out := make([]ddlClause, len(clauses))
@@ -302,13 +303,46 @@ func formatSQLBody(clauses []ddlClause) []ddlClause {
 		if !ok {
 			continue
 		}
-		formatted, err := Format(strings.NewReader(inner))
-		if err != nil {
-			continue // unparseable body: leave it exactly as written
+		var formatted string
+		if lang == "plpgsql" {
+			pl, pok := FormatPlpgsql(inner, 0)
+			if !pok {
+				continue // not a skeleton we recognise: leave it alone
+			}
+			// Only rewrite when it is an improvement. A PL/pgSQL body is
+			// mostly embedded SQL, and a construct the SQL layout handles
+			// poorly -- a SET with several CASE expressions, say -- can
+			// come back wider and more ragged than the author's own
+			// version. The author's version is then the better answer, and
+			// leaving it is always correct.
+			// Indentation legitimately lengthens lines, so the test is
+			// not "longer than before" but "pushed past the target width
+			// when it was not there already".
+			if maxLineLen(pl) > targetWidth && maxLineLen(pl) > maxLineLen(inner) {
+				continue
+			}
+			formatted = pl
+		} else {
+			f, err := Format(strings.NewReader(inner))
+			if err != nil {
+				continue // unparseable body: leave it exactly as written
+			}
+			formatted = f
 		}
 		out[i].body = tag + "\n" + strings.TrimRight(formatted, "\n") + "\n" + tag
 	}
 	return out
+}
+
+// maxLineLen returns the length of the longest line in s.
+func maxLineLen(s string) int {
+	m := 0
+	for _, l := range strings.Split(s, "\n") {
+		if len(l) > m {
+			m = len(l)
+		}
+	}
+	return m
 }
 
 // ddlClause is one rendered continuation clause: its keyword and the text

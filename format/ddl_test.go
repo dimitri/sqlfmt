@@ -90,16 +90,6 @@ func TestLanguageSQLBodyIsFormatted(t *testing.T) {
 	}
 }
 
-// TestNonSQLBodiesUntouched: a plpgsql body is opaque to this formatter and
-// must be passed through exactly as written.
-func TestNonSQLBodiesUntouched(t *testing.T) {
-	body := "\ndeclare\n  channel text := TG_ARGV[0];\nbegin\n  PERFORM 1;\n  return NEW;\nend;\n"
-	got := ddlFmt(t, "create function f() returns trigger language plpgsql as $$"+body+"$$;")
-	if !strings.Contains(got, body) {
-		t.Errorf("plpgsql body was altered:\n%s", got)
-	}
-}
-
 func TestDDLIdempotent(t *testing.T) {
 	srcs := []string{
 		"create or replace function f() returns trigger language plpgsql as $$ begin end; $$;",
