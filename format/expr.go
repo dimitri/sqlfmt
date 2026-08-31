@@ -234,15 +234,21 @@ func clauseParen(toks []Token, i int) bool {
 // at the same column -- the river the rest of the tool uses, applied to a
 // two-line construct:
 //
-//	 count(*)                                percentile_cont(array[0.5, 0.99])
-//	filter(where x is null) as dnfs             within group (order by d)
+//	 count(*)                              percentile_cont(array[0.5, 0.99])
+//	filter(where x is null) as dnfs           within group (order by d)
 //
 // "count" is pushed one column right to end where "filter" ends; where
 // the function name is the longer of the two it stays put and the suffix
 // keyword moves instead.
+//
+// The measure runs through the open paren, not just to the end of the
+// name, because "within group (" carries a space before its paren and
+// "percentile_cont(" does not: aligning the names alone would leave the
+// two argument lists one column apart, which is the thing the alignment
+// exists to line up.
 func aggSuffixLines(head, suffix []Token, col int) []string {
-	name := plainJoin(head[:openParenAt(head)])
-	kw := plainJoin(suffix[:openParenAt(suffix)])
+	name := plainJoin(head[:min(openParenAt(head)+1, len(head))])
+	kw := plainJoin(suffix[:min(openParenAt(suffix)+1, len(suffix))])
 	river := cols(name)
 	if w := cols(kw); w > river {
 		river = w

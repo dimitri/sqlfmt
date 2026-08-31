@@ -160,21 +160,17 @@ func TestAggregateSuffixIsRiverAligned(t *testing.T) {
 	checked := 0
 	for i, l := range lines {
 		body := strings.TrimLeft(l, " ")
-		var kw string
-		switch {
-		case strings.HasPrefix(body, "filter("):
-			kw = "filter"
-		case strings.HasPrefix(body, "within group "):
-			kw = "within group"
-		default:
+		if !strings.HasPrefix(body, "filter(") && !strings.HasPrefix(body, "within group ") {
 			continue
 		}
 		checked++
-		aggEnd := strings.Index(lines[i-1], "(")
-		kwEnd := len(l) - len(body) + len(kw)
-		if aggEnd != kwEnd {
-			t.Errorf("%q ends at %d, its aggregate name at %d -- not aligned:\n%s",
-				kw, kwEnd, aggEnd, got)
+		// The open parens are what must line up, not the names: "within
+		// group (" carries a space before its paren and "count(" does not.
+		aggParen := strings.Index(lines[i-1], "(")
+		kwParen := strings.Index(l, "(")
+		if aggParen != kwParen {
+			t.Errorf("suffix paren at %d, aggregate paren at %d -- not aligned:\n%s",
+				kwParen, aggParen, got)
 		}
 	}
 	if checked != 2 {
