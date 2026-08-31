@@ -204,22 +204,22 @@ func formatBlockComment(c Token, indent int) []string {
 func wrapWords(words []string, indent int, prefix string) []string {
 	var lines []string
 	var cur []string
-	curLen := indent + len(prefix)
+	curLen := indent + cols(prefix)
 	for _, w := range words {
-		add := len(w)
+		add := cols(w)
 		if len(cur) > 0 {
 			add++ // separating space
 		}
 		if curLen+add > commentWidth && len(cur) > 0 {
 			lines = append(lines, strings.Repeat(" ", indent)+prefix+strings.Join(cur, " "))
 			cur = nil
-			curLen = indent + len(prefix)
+			curLen = indent + cols(prefix)
 		}
 		if len(cur) > 0 {
 			curLen++
 		}
 		cur = append(cur, w)
-		curLen += len(w)
+		curLen += cols(w)
 	}
 	if len(cur) > 0 {
 		lines = append(lines, strings.Repeat(" ", indent)+prefix+strings.Join(cur, " "))
@@ -260,15 +260,15 @@ func alignTrailingComments(text string) string {
 		maxLen := 0
 		for j < len(lines) && strings.Contains(lines[j], commentMarker) {
 			content := strings.SplitN(lines[j], commentMarker, 2)[0]
-			if len(content) > maxLen {
-				maxLen = len(content)
+			if cols(content) > maxLen {
+				maxLen = cols(content)
 			}
 			j++
 		}
 		col := maxLen + 2
 		for k := i; k < j; k++ {
 			parts := strings.SplitN(lines[k], commentMarker, 2)
-			pad := col - len(parts[0])
+			pad := col - cols(parts[0])
 			if pad < 1 {
 				pad = 1
 			}

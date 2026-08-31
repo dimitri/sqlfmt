@@ -124,7 +124,7 @@ func TestConcatChainBreaks(t *testing.T) {
 	if squash(got) != squash(src) {
 		t.Errorf("content changed:\n%s", got)
 	}
-	if !strings.Contains(got, "\n       || st_assvg(geom, 0, 1)\n") {
+	if !strings.Contains(got, "\n    || st_assvg(geom, 0, 1)\n") {
 		t.Errorf("chain not broken at ||:\n%s", got)
 	}
 	for _, l := range strings.Split(got, "\n") {

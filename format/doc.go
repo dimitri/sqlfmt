@@ -113,7 +113,7 @@ func hasHard(d Doc) bool {
 func flatWidth(d Doc) int {
 	switch d.kind {
 	case docText:
-		return len(d.text)
+		return cols(d.text)
 	case docLine:
 		return 1
 	case docSoft:
@@ -124,7 +124,7 @@ func flatWidth(d Doc) int {
 		if d.flat == "" {
 			return -1
 		}
-		return len(d.flat)
+		return cols(d.flat)
 	}
 	total := 0
 	for _, p := range d.parts {
@@ -167,14 +167,14 @@ func renderDocTail(d Doc, col, tail int) []string {
 func headWidth(d Doc) (int, bool) {
 	switch d.kind {
 	case docText:
-		return len(d.text), false
+		return cols(d.text), false
 	case docLine, docSoft, docHard:
 		return 0, true
 	case docDefer:
 		if d.flat == "" {
 			return 0, true
 		}
-		return len(d.flat), false
+		return cols(d.flat), false
 	}
 	total := 0
 	for _, p := range d.parts {
@@ -208,10 +208,13 @@ type docRenderer struct {
 
 func (r *docRenderer) write(s string) {
 	r.out[len(r.out)-1] += s
-	r.col += len(s)
+	r.col += cols(s)
 }
 
 func (r *docRenderer) newline(indent int) {
+	if indent < 0 {
+		indent = 0
+	}
 	r.out = append(r.out, strings.Repeat(" ", indent))
 	r.col = indent
 }
@@ -244,7 +247,7 @@ func (r *docRenderer) render(d Doc, indent int, broken bool, tail int) {
 	case docDefer:
 		// Flat if it fits where we are, otherwise let the clause layer lay
 		// it out at this column.
-		if d.flat != "" && r.col+len(d.flat)+tail <= targetWidth {
+		if d.flat != "" && r.col+cols(d.flat)+tail <= targetWidth {
 			r.write(d.flat)
 			return
 		}
@@ -256,7 +259,7 @@ func (r *docRenderer) render(d Doc, indent int, broken bool, tail int) {
 		r.write(sub[0])
 		for _, l := range sub[1:] {
 			r.out = append(r.out, l)
-			r.col = len(l)
+			r.col = cols(l)
 		}
 	case docFill:
 		// Each separator decides on its own: stay on this line while the

@@ -19,6 +19,12 @@ import "strings"
 // exprDoc builds a Doc for a token run, or reports false when the run
 // contains something this layer does not model.
 func exprDoc(toks []Token) (Doc, bool) {
+	return exprDocLevels(toks, binaryLevels)
+}
+
+// exprDocLevels is exprDoc with an explicit operator set; see
+// predicateLevels for why the caller chooses it.
+func exprDocLevels(toks []Token, levels [][]string) (Doc, bool) {
 	toks = trimTokens(toks)
 	if len(toks) == 0 {
 		return Doc{}, false
@@ -33,46 +39,53 @@ func exprDoc(toks []Token) (Doc, bool) {
 			return Doc{}, false
 		}
 	}
-	return exprConcatDoc(toks), true
+	return exprConcatDoc(toks, levels), true
 }
 
 // exprConcatDoc handles the outermost structure: a "||" chain, if there is
 // one, else a comparison, else a plain run.
-func exprConcatDoc(toks []Token) Doc {
-	if parts := splitTopLevelConcat(toks); len(parts) > 1 {
+func exprConcatDoc(toks []Token, levels [][]string) Doc {
+	if parts, ops := splitTopLevelBinary(toks, levels); len(parts) > 1 {
 		ds := make([]Doc, 0, len(parts)*2)
-		for i, p := range parts {
-			if i > 0 {
-				ds = append(ds, line(), text("|| "))
-			}
-			ds = append(ds, exprCompareDoc(trimTokens(p)))
+		ds = append(ds, exprCompareDoc(trimTokens(parts[0]), levels))
+		for i, p := range parts[1:] {
+			// The operator hangs into the gutter left of the operands and
+			// every operand starts at the same column, the way the clause
+			// river sets "and"/"or" under "where". Putting the operator at
+			// the operand column instead pushes each continuation operand
+			// right by the operator's width, so a chain no longer lines up
+			// with the operand it started from.
+			op := ops[i]
+			ds = append(ds,
+				nest(-(cols(op)+1), concat(line(), text(op+" "))),
+				exprCompareDoc(trimTokens(p), levels))
 		}
 		return group(concat(ds...))
 	}
-	return exprCompareDoc(toks)
+	return exprCompareDoc(toks, levels)
 }
 
 // exprCompareDoc breaks at a top-level comparison operator between two
 // parenthesized row constructors -- "(a, b) <> (x, y)" -- which is a break
 // point no amount of breaking inside either list can substitute for.
-func exprCompareDoc(toks []Token) Doc {
+func exprCompareDoc(toks []Token, levels [][]string) Doc {
 	if i := topLevelRowOp(toks); i > 0 {
 		lhs, rhs := trimTokens(toks[:i]), trimTokens(toks[i+1:])
 		if isParenGroup(lhs) && isParenGroup(rhs) {
 			return group(concat(
-				exprAtomDoc(lhs),
+				exprAtomDoc(lhs, levels),
 				line(),
 				text(toks[i].Lower+" "),
-				exprAtomDoc(rhs),
+				exprAtomDoc(rhs, levels),
 			))
 		}
 	}
-	return exprAtomDoc(toks)
+	return exprAtomDoc(toks, levels)
 }
 
 // exprAtomDoc renders a run that has no top-level operator structure left:
 // a parenthesized group (possibly a call's argument list), or plain text.
-func exprAtomDoc(toks []Token) Doc {
+func exprAtomDoc(toks []Token, levels [][]string) Doc {
 	toks = trimTokens(toks)
 	if len(toks) == 0 {
 		return text("")
@@ -88,7 +101,12 @@ func exprAtomDoc(toks []Token) Doc {
 	// it off the run does not end in ")", and the whole item fell through
 	// to a single unbreakable Text.
 	if expr, alias := splitTrailingAlias(toks); alias != "" {
-		return concat(exprAtomDoc(expr), text(" "+alias))
+		return concat(exprAtomDoc(expr, levels), text(" "+alias))
+	}
+	// Same problem as the alias: "extract(...)::int" ends in a type name,
+	// not in ")", so the paren logic below never saw the call it wraps.
+	if expr, cast := splitTrailingCast(toks); cast != "" {
+		return concat(exprAtomDoc(expr, levels), text(cast))
 	}
 	// A trailing parenthesized group is the interesting case: a call's
 	// arguments, a row constructor, an IN list.
@@ -104,7 +122,7 @@ func exprAtomDoc(toks []Token) Doc {
 					// what the corpus does and reads worse than two.
 					ds := make([]Doc, 0, len(items))
 					for _, it := range items {
-						ds = append(ds, exprConcatDoc(trimTokens(it)))
+						ds = append(ds, exprConcatDoc(trimTokens(it), levels))
 					}
 					args := fill(concat(text(","), line()), ds...)
 					_ = args
@@ -149,6 +167,33 @@ func deferredConstruct(toks []Token) (Doc, bool) {
 	return Doc{}, false
 }
 
+// splitTrailingCast peels a trailing "::type" (including a schema
+// qualification and array brackets) off an expression, so what remains
+// ends in the ")" the paren layout keys on.
+func splitTrailingCast(toks []Token) ([]Token, string) {
+	n := len(toks)
+	// Walk back over "[]" pairs and a dotted type name to the "::".
+	i := n
+	for i > 0 && toks[i-1].Text == "]" {
+		if i < 2 || toks[i-2].Text != "[" {
+			return toks, ""
+		}
+		i -= 2
+	}
+	for i > 0 && (toks[i-1].Kind == TokIdent || toks[i-1].Kind == TokKeyword) {
+		i--
+		if i > 0 && toks[i-1].Text == "." {
+			i--
+			continue
+		}
+		break
+	}
+	if i < 2 || toks[i-1].Text != "::" || i-1 == 0 {
+		return toks, ""
+	}
+	return toks[:i-1], plainJoin(toks[i-1:])
+}
+
 // splitTrailingAlias peels a trailing column alias off an expression,
 // returning the expression and the alias text ("as elem", "elem"), or an
 // empty alias when there is none. Only an alias directly after a closing
@@ -188,7 +233,17 @@ func lastTopLevelOpen(toks []Token) int {
 // the run is one this layer declines, or when the result is no better than
 // the flat form the caller already has.
 func exprLines(toks []Token, col int) ([]string, bool) {
-	d, ok := exprDoc(toks)
+	return exprLinesLevels(toks, col, binaryLevels)
+}
+
+// predicateLines lays out a condition -- a WHERE body, a JOIN ... ON --
+// which may also break at a comparison operator.
+func predicateLines(toks []Token, col int) ([]string, bool) {
+	return exprLinesLevels(toks, col, predicateLevels)
+}
+
+func exprLinesLevels(toks []Token, col int, levels [][]string) ([]string, bool) {
+	d, ok := exprDocLevels(toks, levels)
 	if !ok {
 		return nil, false
 	}
@@ -203,11 +258,11 @@ func exprLines(toks []Token, col int) ([]string, bool) {
 	flat := plainJoin(trimTokens(toks))
 	longest := 0
 	for _, l := range lines {
-		if n := len(l); n > longest {
+		if n := cols(l); n > longest {
 			longest = n
 		}
 	}
-	if longest >= col+len(flat) {
+	if longest >= col+cols(flat) {
 		return nil, false
 	}
 	return lines, true

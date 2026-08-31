@@ -268,11 +268,42 @@ func isJoinModifier(lower string) bool {
 // across several lines, was folded back onto the JOIN line and ran to
 // hundreds of columns. Always returns at least one line.
 func joinTableLines(toks []Token, col int) []string {
-	lines := renderRun(trimTokens(toks), col)
+	toks = trimTokens(toks)
+	lines := renderRun(toks, col)
 	if len(lines) == 0 {
 		return []string{""}
 	}
+	// A join whose ON condition is one wide comparison has no comma to
+	// break at and renderRun leaves it long; the Doc layer can break it at
+	// the comparison operator. Only the condition is offered -- the table
+	// and its alias belong on the "join" line.
+	if col+cols(plainJoin(toks)) > targetWidth {
+		if i := joinOnIndex(toks); i > 0 {
+			head := plainJoin(toks[:i+1])
+			if l, ok := predicateLines(trimTokens(toks[i+1:]), col+cols(head)+1); ok {
+				out := []string{head + " " + l[0]}
+				return append(out, l[1:]...)
+			}
+		}
+	}
 	return lines
+}
+
+// joinOnIndex returns the index of a join's top-level ON keyword, or -1.
+func joinOnIndex(toks []Token) int {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth == 0 && t.Kind == TokKeyword && t.Lower == "on" {
+			return i
+		}
+	}
+	return -1
 }
 
 // splitJoinSegments splits a FROM clause's tokens into the leading table
@@ -520,7 +551,7 @@ func layoutValuesRow(body []Token, bodyCol int) ([]string, bool) {
 	if len(items) != 1 || !isParenGroup(body) {
 		return nil, false
 	}
-	if bodyCol+len(plainJoin(body)) <= targetWidth {
+	if bodyCol+cols(plainJoin(body)) <= targetWidth {
 		return nil, false
 	}
 	filled, ok := fillCommaList(body[1:len(body)-1], bodyCol+1)
@@ -565,7 +596,7 @@ func layoutInsertTarget(body []Token, bodyCol int) ([]string, bool) {
 	}
 	head := plainJoin(body[:open])
 	flat := head + plainJoin(body[open:])
-	if bodyCol+len(flat) <= targetWidth {
+	if bodyCol+cols(flat) <= targetWidth {
 		return nil, false
 	}
 	filled, ok := fillCommaList(body[open+1:len(body)-1], bodyCol+len(head)+1)
@@ -606,13 +637,13 @@ func layoutRowAssignment(body []Token, baseIndent, width int) ([]string, bool) {
 		return nil, false
 	}
 	bodyCol := baseIndent + width + 1
-	if bodyCol+len(plainJoin(body)) <= targetWidth {
+	if bodyCol+cols(plainJoin(body)) <= targetWidth {
 		return nil, false // fits as it is
 	}
 
 	side := func(g []Token, col int) []string {
 		flat := plainJoin(g)
-		if col+len(flat) <= targetWidth {
+		if col+cols(flat) <= targetWidth {
 			return []string{flat}
 		}
 		if filled, ok := fillCommaList(g[1:len(g)-1], col+1); ok {
@@ -670,7 +701,7 @@ func fillCommaList(inner []Token, col int) (lines []string, ok bool) {
 	texts := make([]string, len(items))
 	for i, it := range items {
 		texts[i] = plainJoin(trimTokens(it))
-		if col+len(texts[i]) > targetWidth {
+		if col+cols(texts[i]) > targetWidth {
 			return nil, false
 		}
 	}
@@ -683,7 +714,7 @@ func fillCommaList(inner []Token, col int) (lines []string, ok bool) {
 		switch {
 		case cur == "":
 			cur = piece
-		case col+len(cur)+1+len(piece) <= targetWidth:
+		case col+cols(cur)+1+cols(piece) <= targetWidth:
 			cur += " " + piece
 		default:
 			lines = append(lines, cur)
@@ -797,7 +828,7 @@ func renderRun(toks []Token, col int) []string {
 				write(" ")
 			}
 			flat := plainJoin(overToks)
-			if curCol+len(flat) <= targetWidth {
+			if curCol+cols(flat) <= targetWidth {
 				write(flat)
 			} else {
 				merge(layoutOver(overToks, curCol))
@@ -854,7 +885,7 @@ func renderRun(toks []Token, col int) []string {
 				// declines when the paren sits too deep for breaking to
 				// help, leaving the flat form rather than a ragged one.
 				if needSpace && len(content) == 1 &&
-					curCol+len(content[0]) > targetWidth {
+					curCol+cols(content[0]) > targetWidth {
 					if filled, fok := fillCommaList(inner, curCol+1); fok {
 						write("(")
 						merge(filled)
@@ -941,7 +972,7 @@ func plainJoin(toks []Token) string {
 // Alignment is always recomputed fresh per call (STYLE.md rule 15).
 func layoutCase(toks []Token, caseCol int) []string {
 	flat := plainJoin(toks)
-	if caseCol+len(flat) <= targetWidth {
+	if caseCol+cols(flat) <= targetWidth {
 		return []string{flat}
 	}
 
@@ -1158,7 +1189,7 @@ func layoutCommaList(toks []Token, startCol int) []string {
 	// metadata on these tokens as a side effect, which the multi-line path
 	// below still needs intact if this fast path doesn't end up taking it.
 	if len(items) > 0 && !anyItemComments(items) && !hasLineComment(toks) {
-		if flat := flatJoin(trimTokens(toks)); startCol+len(flat) <= targetWidth {
+		if flat := flatJoin(trimTokens(toks)); startCol+cols(flat) <= targetWidth {
 			return []string{flat}
 		}
 	}
@@ -1184,7 +1215,7 @@ func layoutCommaList(toks []Token, startCol int) []string {
 		// happened to break it: renderRun breaks greedily at the first
 		// paren that does not fit, which would pre-empt the Doc layer on
 		// exactly the items it exists for.
-		if startCol+len(plainJoin(trimTokens(it))) > targetWidth {
+		if startCol+cols(plainJoin(trimTokens(it))) > targetWidth {
 			if el, ok := exprLines(it, startCol); ok {
 				itLines = el
 			} else if len(itLines) == 1 {
@@ -1356,8 +1387,15 @@ func layoutPredicateList(toks []Token, endCol int) []string {
 		// list is a useful break point, the operator is.
 		// baseIndent 0 / width endCol puts the operator's own right edge at
 		// endCol, the column the clause keyword and any AND/OR end at.
-		if len(pLines) == 1 && startCol+len(pLines[0]) > targetWidth {
+		// Gate on the predicate's own flat width rather than on whether
+		// renderRun happened to break it, for the reason layoutCommaList
+		// gives: renderRun breaks greedily at the first paren that does
+		// not fit, which pre-empts the Doc layer on exactly the predicates
+		// it exists for.
+		if startCol+cols(plainJoin(trimTokens(p))) > targetWidth {
 			if l, ok := layoutRowAssignment(trimTokens(p), 0, endCol); ok {
+				pLines = l
+			} else if l, ok := predicateLines(trimTokens(p), startCol); ok {
 				pLines = l
 			}
 		}

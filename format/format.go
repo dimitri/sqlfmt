@@ -170,6 +170,8 @@ func formatStatement(toks []Token) string {
 		}
 	case "select", "insert", "update", "delete", "with":
 		lines = formatQuerySegment(body, 0)
+	case "alter":
+		lines = layoutAlter(body)
 	case "explain":
 		lines = layoutExplain(body)
 	case "merge":
@@ -272,7 +274,7 @@ func layoutDDL(toks []Token) []string {
 		}
 	}
 	head := flatJoin(toks[:bounds[0].idx])
-	if len(head)+1+len(flatJoin(toks[bounds[0].idx:])) <= targetWidth {
+	if cols(head)+1+cols(flatJoin(toks[bounds[0].idx:])) <= targetWidth {
 		return []string{flatJoin(toks)}
 	}
 
@@ -302,7 +304,7 @@ func layoutDDL(toks []Token) []string {
 	// The head can overflow on its own -- "create statistics name (kind,
 	// kind, ...)" carries a list too -- and gets the same treatment.
 	headLines := []string{head}
-	if len(head) > targetWidth {
+	if cols(head) > targetWidth {
 		if filled, ok := ddlFillBody(toks[:bounds[0].idx], 0); ok {
 			headLines = filled
 		}
@@ -314,7 +316,7 @@ func layoutDDL(toks []Token) []string {
 			lines = append(lines, prefix)
 			continue
 		}
-		if len(prefix)+1+len(c.body) > targetWidth && ci < len(clauseToks) {
+		if cols(prefix)+1+cols(c.body) > targetWidth && ci < len(clauseToks) {
 			// An index's column list or a statistics kind list is
 			// call-shaped -- "using btree(a, b, ...)" -- so renderRun's
 			// paren handling leaves it alone per rule 4, and a wide one
@@ -746,8 +748,8 @@ func layoutCreateTable(toks []Token) []string {
 		if len(it) == 0 || isConstraint(it) {
 			continue
 		}
-		if len(it[0].Text) > maxName {
-			maxName = len(it[0].Text)
+		if cols(it[0].Text) > maxName {
+			maxName = cols(it[0].Text)
 		}
 	}
 
@@ -780,7 +782,7 @@ func layoutCreateTable(toks []Token) []string {
 		}
 		name := it[0].Text
 		rest := renderRun(trimTokens(it[1:]), 2+maxName+1)
-		pad := strings.Repeat(" ", maxName-len(name))
+		pad := strings.Repeat(" ", maxName-cols(name))
 		lines = append(lines, "  "+name+pad+" "+rest[0]+comma+trailing)
 		lines = append(lines, rest[1:]...)
 		prevWasColumn = true

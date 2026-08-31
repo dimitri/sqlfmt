@@ -16,7 +16,8 @@ with decades as (
         on results.driverid = drivers.driverid
        and results.position = 1
       join races using(raceid)
-     where extract('year' from date_trunc('decade', races.date)) = decades.decade
+     where extract('year' from date_trunc('decade', races.date))
+         = decades.decade
   group by decades.decade, drivers.driverid
   order by wins desc
      limit 3

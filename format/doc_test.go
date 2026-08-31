@@ -96,8 +96,20 @@ func TestCallArgsFillNotExplode(t *testing.T) {
 func TestConcatChainOnePerLine(t *testing.T) {
 	src := "select '<path d=\"' || st_assvg(geom, 0, 1) || '\" fill=\"none\" stroke=\"#C0B8AE\" stroke-width=\"2\"/>' as elem from shapes;"
 	got := docFmt(t, src)
-	if strings.Count(got, "\n|| ") < 1 && strings.Count(got, "       || ") < 1 {
+	// The operator hangs left of the operand column and every operand
+	// lines up under the first one, as "and"/"or" do under "where".
+	if strings.Count(got, "\n    || ") < 2 {
 		t.Errorf("chain not broken one part per line:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if op := strings.Index(l, "|| "); op >= 0 {
+			if !strings.HasPrefix(strings.TrimLeft(l, " "), "|| ") {
+				continue
+			}
+			if operandCol := op + 3; operandCol != 7 {
+				t.Errorf("operand at column %d, want 7 (aligned with the first):\n%s", operandCol, got)
+			}
+		}
 	}
 }
 
