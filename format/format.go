@@ -96,7 +96,7 @@ func statementKeyword(toks []Token) string {
 				"temp", "temporary", "unlogged", "concurrently":
 				continue
 			case "table", "index", "function", "view", "trigger", "statistics",
-				"sequence", "procedure", "materialized":
+				"sequence", "procedure", "materialized", "database":
 				kind := toks[i].Lower
 				if kind == "materialized" {
 					// "create materialized view" lays out as a view.
@@ -172,6 +172,18 @@ func formatStatement(toks []Token) string {
 		lines = formatQuerySegment(body, 0)
 	case "alter":
 		lines = layoutAlter(body)
+	case "grant", "revoke":
+		if l, ok := layoutIndentedClauses(body, grantClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
+	case "create database":
+		if l, ok := layoutIndentedClauses(body, databaseClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
 	case "explain":
 		lines = layoutExplain(body)
 	case "merge":
@@ -726,6 +738,9 @@ func createTableAsBody(toks []Token) int {
 func layoutCreateTable(toks []Token) []string {
 	open := createTableColumnList(toks)
 	if open == -1 {
+		if l, ok := layoutIndentedClauses(toks, partitionClauses, 2); ok {
+			return l
+		}
 		if body := createTableAsBody(toks); body != -1 {
 			head := flatStatementLines(toks[:body])
 			return append(head, strings.Split(formatStatement(toks[body:]), "\n")...)

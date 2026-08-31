@@ -27,6 +27,11 @@ var alterSubcommands = map[string]bool{
 //
 // and a short one stays whole: "alter table t add column c int;".
 func layoutAlter(toks []Token) []string {
+	if len(toks) > 2 && toks[1].Lower == "default" && toks[2].Lower == "privileges" {
+		if l, ok := layoutIndentedClauses(toks, defaultPrivClauses, 2); ok {
+			return l
+		}
+	}
 	if len(toks) < 2 || toks[1].Lower != "table" {
 		return flatStatementLines(toks)
 	}
@@ -51,6 +56,14 @@ func layoutAlter(toks []Token) []string {
 		}
 		trailing := trailingCommentSuffix(it)
 		sub := renderRun(it, 2)
+		// One subcommand can be too wide on its own -- "add constraint c
+		// check (...) not valid" is three lines by hand. Its inner clauses
+		// hang under the subcommand rather than under the statement.
+		if len(sub) == 1 && 2+cols(sub[0]) > targetWidth {
+			if l, ok := layoutIndentedClauses(it, alterInnerClauses, 6); ok && len(l) > 1 {
+				sub = l
+			}
+		}
 		comma := ","
 		if i == len(items)-1 {
 			comma = ""

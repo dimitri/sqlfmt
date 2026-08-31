@@ -83,6 +83,15 @@ var keywords = buildKeywordSet([]string{
 	"merge", "matched", "source", "target",
 	"immutable", "stable", "volatile", "strict", "parallel", "security",
 	"definer", "invoker", "concurrently", "unlogged", "inherits",
+	// The ALTER/GRANT/CREATE DATABASE vocabulary, for the same reason:
+	// without it "ALTER TABLE t ATTACH PARTITION p" came back as
+	// "alter table t ATTACH partition p", and "GRANT SELECT" as
+	// "GRANT select" -- rule 1 lowercasing whichever word of the pair
+	// already happened to be in this table.
+	"attach", "detach", "validate", "rename", "add", "column",
+	"privileges", "database", "encoding", "owner", "grant", "revoke",
+	"template", "cascade", "restrict", "role", "usage", "tables",
+	"sequences", "routines", "extension", "enable", "disable",
 })
 
 func buildKeywordSet(words []string) map[string]bool {
