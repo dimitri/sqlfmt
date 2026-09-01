@@ -443,9 +443,14 @@ func spaceBetween(prevPrev *Token, prev, next Token) bool {
 		// "filter" joins this list rather than changing shape now that it
 		// is a keyword: the corpus writes "filter(where ...)" closed up,
 		// the way it writes "over(...)".
+		// "split" joins left/right for the same reason: it became a
+		// keyword for ALTER TABLE ... SPLIT PARTITION, where it is never
+		// followed by "(", so a "(" after it is always a call. Note
+		// "partitions" deliberately stays off this list -- MERGE
+		// PARTITIONS (a, b) is exactly the case that wants the space.
 		if prev.Kind == TokIdent || prev.Lower == "using" || prev.Lower == "over" ||
 			prev.Lower == "filter" ||
-			prev.Lower == "left" || prev.Lower == "right" {
+			prev.Lower == "left" || prev.Lower == "right" || prev.Lower == "split" {
 			return false
 		}
 		return true

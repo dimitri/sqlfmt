@@ -55,9 +55,14 @@ var (
 	}
 	// Inside one ALTER TABLE subcommand: "add constraint c check (...) not
 	// valid" is three lines by hand, not one.
+	// "into" is what MERGE PARTITIONS and SPLIT PARTITION hang on when the
+	// subcommand is too wide to sit on one line:
+	//
+	//	merge partitions (races_2015, races_2016, races_2017)
+	//	      into races_2015_2017
 	alterInnerClauses = []clauseStarter{
 		{"check"}, {"not", "valid"}, {"using"}, {"references"},
-		{"for", "values"}, {"default"},
+		{"for", "values"}, {"default"}, {"into"},
 	}
 )
 

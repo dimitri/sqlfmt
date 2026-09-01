@@ -9,6 +9,11 @@ var alterSubcommands = map[string]bool{
 	"disable": true, "validate": true, "attach": true, "detach": true,
 	"inherit": true, "no": true, "cluster": true, "replica": true,
 	"of": true, "not": true, "force": true, "options": true,
+	// PG 19's partition restructuring subcommands. Without them
+	// alterHeaderEnd returned -1 and layoutAlter fell back to
+	// flatStatementLines, which is how a MERGE PARTITIONS came out on a
+	// single 117-column line and a SPLIT PARTITION on a 180-column one.
+	"merge": true, "split": true,
 }
 
 // layoutAlter lays out ALTER TABLE, whose payload is a comma-separated
