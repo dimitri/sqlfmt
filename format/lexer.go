@@ -93,6 +93,12 @@ var keywords = buildKeywordSet([]string{
 	"privileges", "database", "encoding", "owner", "grant", "revoke",
 	"template", "cascade", "restrict", "role", "usage", "tables",
 	"sequences", "routines", "extension", "enable", "disable",
+	// "partitions" (plural) and "split" complete the PG 19 partition
+	// subcommands. "split" has to be a keyword because alterHeaderEnd
+	// only accepts a TokKeyword as a subcommand opener, and "partitions"
+	// because rule 4 drops the space before "(" after an identifier, so
+	// "MERGE PARTITIONS (a, b)" came out as "merge partitions(a, b)".
+	"partitions", "split",
 })
 
 func buildKeywordSet(words []string) map[string]bool {

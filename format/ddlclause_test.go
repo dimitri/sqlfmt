@@ -182,3 +182,80 @@ func TestAggregateSuffixIsRiverAligned(t *testing.T) {
 		t.Errorf("OVER lost its frame layout:\n%s", over)
 	}
 }
+
+// MERGE PARTITIONS and SPLIT PARTITION are ALTER TABLE subcommands, but
+// neither "merge" nor "split" was in alterSubcommands, so alterHeaderEnd
+// returned -1 and layoutAlter fell back to flatStatementLines: the merge
+// came out on one 117-column line, the split on a 180-column one. Rule 22
+// wants the subcommand at indent 2 and its INTO hung under it at indent 6.
+func TestPartitionSubcommandsBreak(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []string
+	}{
+		{"merge partitions",
+			"alter table demo_races merge partitions (demo_races_2015, demo_races_2016, demo_races_2017) into demo_races_2015_2017;\n",
+			[]string{
+				"alter table demo_races",
+				"  merge partitions (demo_races_2015, demo_races_2016, demo_races_2017)",
+				"      into demo_races_2015_2017;",
+			}},
+		{"split partition",
+			"alter table demo_races split partition demo_races_2015_2017 into (partition demo_races_2015 for values from (2015) to (2016), partition demo_races_2016 for values from (2016) to (2017));\n",
+			[]string{
+				"alter table demo_races",
+				"  split partition demo_races_2015_2017",
+				"      into (partition demo_races_2015 for values from (2015) to (2016),",
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mustFormat(t, c.src)
+			for _, w := range c.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("want line %q in:\n%s", w, got)
+				}
+			}
+			for _, l := range strings.Split(got, "\n") {
+				if cols(l) > targetWidth {
+					t.Errorf("line over the margin (%d cols):\n%s", cols(l), got)
+				}
+			}
+			// The clause loss this whole area is prone to: nothing may
+			// go missing, and a second pass must not move anything.
+			if squash(got) != squash(c.src) {
+				t.Errorf("content lost:\nwant %s\ngot  %s", squash(c.src), squash(got))
+			}
+			if twice := mustFormat(t, got); twice != got {
+				t.Errorf("not idempotent:\nonce:\n%s\ntwice:\n%s", got, twice)
+			}
+		})
+	}
+}
+
+// "partitions" is plural and was not in the keyword table, so it lexed as
+// an identifier and rule 4 closed up the space before its "(".
+func TestMergePartitionsKeepsSpaceBeforeParen(t *testing.T) {
+	got := mustFormat(t, "alter table t merge partitions (a, b) into c;\n")
+	if strings.Contains(got, "partitions(") {
+		t.Errorf("space before \"(\" was dropped:\n%s", got)
+	}
+	if strings.Count(got, "\n") > 1 {
+		t.Errorf("a short subcommand was broken up:\n%s", got)
+	}
+}
+
+// "split" had to become a keyword for SPLIT PARTITION, which would have
+// turned every split(...) call into "split (...)" -- the same trap
+// left(...) and right(...) already sit in.
+func TestSplitStaysAFunctionCall(t *testing.T) {
+	for _, src := range []string{
+		"select split(a) from t;\n",
+		"select split_part(a, ',', 1) from t;\n",
+	} {
+		got := mustFormat(t, src)
+		if got != src {
+			t.Errorf("call was reshaped:\nwant %q\ngot  %q", src, got)
+		}
+	}
+}
