@@ -259,3 +259,55 @@ func TestSplitStaysAFunctionCall(t *testing.T) {
 		}
 	}
 }
+
+// PG 19's ON CONFLICT ... DO SELECT is a two-word conflict action like DO
+// NOTHING -- "DO SELECT [FOR ...] [WHERE ...]", with no select list, since
+// the projection is the INSERT's own (mandatory) RETURNING. "select" was a
+// clauseWords entry, so it became a river segment with an empty body and
+// pushed RETURNING under it.
+func TestOnConflictDoSelectStaysInline(t *testing.T) {
+	got := mustFormat(t, "insert into demo_driver_seen (driverid, surname) values (1, 'Hamilton') on conflict (driverid) do select returning driverid, surname, first_seen_at;\n")
+	for _, w := range []string{
+		"on conflict (driverid) do select\n",
+		"  returning driverid, surname, first_seen_at;",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("want %q in:\n%s", w, got)
+		}
+	}
+	if strings.Contains(got, "do\n") {
+		t.Errorf("DO SELECT was split across lines:\n%s", got)
+	}
+	if twice := mustFormat(t, got); twice != got {
+		t.Errorf("not idempotent:\nonce:\n%s\ntwice:\n%s", got, twice)
+	}
+	// DO UPDATE keeps its split: its SET really is a clause with a body.
+	upd := mustFormat(t, "insert into t (a, b) values (1, 2) on conflict (a) do update set b = excluded.b returning a, b;\n")
+	if !strings.Contains(upd, "do\n     update\n") {
+		t.Errorf("DO UPDATE lost its layout:\n%s", upd)
+	}
+}
+
+// The UPDATE closing a row-locking clause is not the UPDATE statement's
+// clause keyword. This predates PG 19 -- the committed corpus had the
+// mangled "... messageid for\n      update skip locked" baked into it --
+// and DO SELECT's optional FOR UPDATE reaches the same code.
+func TestRowLockingClauseIsNotAnUpdateClause(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"select a, b from t where a = 1 for update;\n", " where a = 1 for update;"},
+		{"select a, b from t where a = 1 for no key update;\n", " where a = 1 for no key update;"},
+		{"insert into t (a) values (1) on conflict (a) do select for update returning a;\n", "do select for update"},
+	} {
+		got := mustFormat(t, c.src)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("want %q in:\n%s", c.want, got)
+		}
+		if strings.Contains(got, "\nupdate") {
+			t.Errorf("row-locking UPDATE started a clause:\n%s", got)
+		}
+	}
+	// A real UPDATE statement is untouched.
+	if got := mustFormat(t, "update t set a = 1 where b = 2;\n"); !strings.HasPrefix(got, "update t") {
+		t.Errorf("UPDATE statement was reshaped:\n%s", got)
+	}
+}
