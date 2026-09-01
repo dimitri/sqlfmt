@@ -200,6 +200,23 @@ func splitTopLevelComma(toks []Token) [][]Token {
 // splitClauses cuts a query's top-level tokens into clauses at recognized
 // clause-keyword boundaries (STYLE.md's clause list, plus limit/offset which
 // participate in the same river alignment in real corpus output).
+// isRowLockTail reports whether the "update" at toks[i] closes a row-level
+// locking clause: "for update" or "for no key update".
+func isRowLockTail(toks []Token, i int) bool {
+	// "no" is not in the keyword table, so match the two filler words on
+	// text alone and require only the "for" itself to be a keyword.
+	kw := func(n int, w string) bool {
+		return n >= 0 && toks[n].Kind == TokKeyword && toks[n].Lower == w
+	}
+	word := func(n int, w string) bool {
+		return n >= 0 && toks[n].Lower == w
+	}
+	if kw(i-1, "for") {
+		return true
+	}
+	return word(i-1, "key") && word(i-2, "no") && kw(i-3, "for")
+}
+
 func splitClauses(toks []Token) []clauseSeg {
 	var segs []clauseSeg
 	depth := 0
@@ -220,6 +237,38 @@ func splitClauses(toks []Token) []clauseSeg {
 			continue
 		}
 		if depth != 0 || t.Kind != TokKeyword {
+			continue
+		}
+		// "do select" is one of ON CONFLICT's three conflict actions, a
+		// two-word atom like "do nothing" -- not a SELECT introducing a
+		// body. PostgreSQL 19's grammar is "DO SELECT [FOR ...] [WHERE
+		// ...]" with no select list at all, because the projection is
+		// the INSERT's own RETURNING (which DO SELECT makes mandatory).
+		// Splitting at the "select" put it on a river line of its own
+		// with an empty body, and pushed RETURNING under it:
+		//
+		//	on conflict (driverid) do
+		//	     select
+		//	  returning driverid, surname
+		//	^ was
+		//
+		// "do update" deliberately still splits: its SET really is a
+		// clause with a body to lay out.
+		if t.Lower == "select" && i > 0 && toks[i-1].Kind == TokKeyword &&
+			toks[i-1].Lower == "do" {
+			continue
+		}
+		// The UPDATE in a row-locking clause -- FOR UPDATE, FOR NO KEY
+		// UPDATE -- is not the UPDATE statement's clause keyword. This
+		// is not new to PG 19: a plain "select ... where a = 1 for
+		// update" already came apart as
+		//
+		//	 where a = 1 for
+		//	update;
+		//
+		// with "update" starting a clause of its own. DO SELECT's
+		// optional FOR UPDATE hits the same path.
+		if t.Lower == "update" && isRowLockTail(toks, i) {
 			continue
 		}
 		for _, cw := range clauseWords {
