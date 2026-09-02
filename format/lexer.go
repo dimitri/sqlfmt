@@ -99,6 +99,13 @@ var keywords = buildKeywordSet([]string{
 	// because rule 4 drops the space before "(" after an identifier, so
 	// "MERGE PARTITIONS (a, b)" came out as "merge partitions(a, b)".
 	"partitions", "split",
+	// SQL/PGQ (PG 19). "match" and "columns" have to be keywords for
+	// splitGraphTable to find the two halves of a GRAPH_TABLE, and the
+	// rest are here for rule 1: without them "CREATE PROPERTY GRAPH ...
+	// VERTEX TABLES" came back with half its words lowercased and half
+	// left as typed, since only "tables" was in this table.
+	"graph_table", "graph", "property", "properties", "match", "columns",
+	"vertex", "edge", "relationship", "node", "destination",
 })
 
 func buildKeywordSet(words []string) map[string]bool {

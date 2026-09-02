@@ -343,6 +343,20 @@ func deferredConstruct(toks []Token) (Doc, bool) {
 				return layoutOver(run, col)
 			}), true
 		}
+	case "graph_table":
+		// Note the width here is graphTableJoin, not plainJoin: a path
+		// pattern measured with spaces around every "-" and "[" reads a
+		// dozen columns wider than it prints, which is enough to make the
+		// Doc layer break a GRAPH_TABLE that would have fitted.
+		if isGraphTable(toks, 0) && matchParen(toks, 1) == len(toks)-1 {
+			run := toks
+			return defer_(graphTableJoin(run), func(col int) []string {
+				if l := layoutGraphTable(run, col); l != nil {
+					return l
+				}
+				return []string{graphTableJoin(run)}
+			}), true
+		}
 	}
 	return Doc{}, false
 }
