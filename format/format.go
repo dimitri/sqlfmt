@@ -95,6 +95,15 @@ func statementKeyword(toks []Token) string {
 			case "or", "replace", "unique", "if", "not", "exists", "recursive",
 				"temp", "temporary", "unlogged", "concurrently":
 				continue
+			case "property":
+				// "create property graph" / "alter property graph" /
+				// "drop property graph": one kind, three verbs. ALTER's
+				// subcommands are not layoutAlter's, so it must not fall
+				// through to the generic "alter" case below.
+				if i+1 < len(toks) && toks[i+1].Lower == "graph" {
+					return "property graph"
+				}
+				continue
 			case "table", "index", "function", "view", "trigger", "statistics",
 				"sequence", "procedure", "materialized", "database":
 				kind := toks[i].Lower
@@ -186,6 +195,8 @@ func formatStatement(toks []Token) string {
 		} else {
 			lines = flatStatementLines(body)
 		}
+	case "property graph":
+		lines = layoutPropertyGraph(body)
 	case "explain":
 		lines = layoutExplain(body)
 	case "merge":

@@ -311,3 +311,109 @@ func TestRowLockingClauseIsNotAnUpdateClause(t *testing.T) {
 		t.Errorf("UPDATE statement was reshaped:\n%s", got)
 	}
 }
+
+// SQL/PGQ (PG 19). PostgreSQL spells an edge out of single-character
+// tokens -- "'-' '[' ... ']' '-' '>'" -- so the generic expression path
+// saw the leading "-" as a binary operator and broke the line at it,
+// stranding "-> (n is country)" on the next. A quantifier fared worse:
+// "->{1,4}" is four more tokens, and its comma looked like a list
+// separator, so it came back as "-> { 1,\n4 }".
+func TestGraphPatternIsNeverBroken(t *testing.T) {
+	cases := []struct {
+		name, src string
+		want      []string
+	}{
+		{"edge arrow stays whole",
+			"select neighbour from graph_table (borders match (c is country where c.name = 'France')-[is borders]->(n is country) columns (n.name as neighbour)) order by neighbour;\n",
+			[]string{
+				"    from graph_table (borders",
+				"             match (c is country where c.name = 'France')",
+				"                   -[is borders]->(n is country)",
+				"           columns (n.name as neighbour))",
+			}},
+		{"quantifier keeps its braces closed up",
+			"select r from graph_table (borders match (c is country)-[is borders]->{1,4}(n is country) columns (n.name as r)) order by r;\n",
+			[]string{"-[is borders]->{1,4}(n is country)"}},
+		{"left and any edges",
+			"select a from graph_table (g match (a)<-[e is rel]-(b)-[f]-(c) columns (a.n as a));\n",
+			[]string{"(a)<-[e is rel]-(b)-[f]-(c)"}},
+		{"abbreviated edges",
+			"select a from graph_table (g match (a)->(b)<-(c)-(d) columns (a.n as a));\n",
+			[]string{"(a)->(b)<-(c)-(d)"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mustFormat(t, c.src)
+			for _, w := range c.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("want %q in:\n%s", w, got)
+				}
+			}
+			if squash(got) != squash(c.src) {
+				t.Errorf("content lost:\nwant %s\ngot  %s", squash(c.src), squash(got))
+			}
+			if twice := mustFormat(t, got); twice != got {
+				t.Errorf("not idempotent:\nonce:\n%s\ntwice:\n%s", got, twice)
+			}
+			for _, l := range strings.Split(got, "\n") {
+				if cols(l) > targetWidth {
+					t.Errorf("line over the margin (%d cols):\n%s", cols(l), got)
+				}
+			}
+		})
+	}
+}
+
+// Ordinary spacing still applies inside a vertex or edge body: only the
+// pattern's own punctuation is closed up. Passing a nil prevPrev to
+// spaceBetween here turned "where a.pop - 1 > 0" into "a.pop -1 > 0",
+// since it needs that token to tell a binary minus from a unary one.
+func TestGraphElementBodyKeepsNormalSpacing(t *testing.T) {
+	got := mustFormat(t, "select a from graph_table (g match (a is c where a.pop - 1 > 0)-[e]->(b) columns (a.n as a));\n")
+	if !strings.Contains(got, "where a.pop - 1 > 0") {
+		t.Errorf("body spacing was closed up:\n%s", got)
+	}
+}
+
+// CREATE PROPERTY GRAPH fell through to flatJoin and came back as one
+// 280-column line. Rule 22 wants the clauses at indent 2; the element
+// table lists then need one definition per line, and a definition too wide
+// on its own hangs its SOURCE/DESTINATION/LABEL under it.
+func TestPropertyGraphBreaksIntoClauses(t *testing.T) {
+	src := "create property graph borders vertex tables (geoname.country key (isocode) label country properties (name, iso)) edge tables (geoname.neighbour key (isocode, neighbour) source key (isocode) references country (isocode) destination key (neighbour) references country (isocode) label borders);\n"
+	got := mustFormat(t, src)
+	for _, w := range []string{
+		"create property graph borders\n",
+		"  vertex tables (\n",
+		"    geoname.country key (isocode) label country properties (name, iso)\n",
+		"  edge tables (\n",
+		"    geoname.neighbour key (isocode, neighbour)\n",
+		"      source key (isocode) references country(isocode)\n",
+		"      destination key (neighbour) references country(isocode)\n",
+		"      label borders\n",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("want %q in:\n%s", w, got)
+		}
+	}
+	if squash(got) != squash(src) {
+		t.Errorf("content lost:\nwant %s\ngot  %s", squash(src), squash(got))
+	}
+	if twice := mustFormat(t, got); twice != got {
+		t.Errorf("not idempotent:\nonce:\n%s\ntwice:\n%s", got, twice)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if cols(l) > targetWidth {
+			t.Errorf("line over the margin (%d cols):\n%s", cols(l), got)
+		}
+	}
+	// A short one is left whole, and DROP is not reshaped at all.
+	short := mustFormat(t, "create property graph g1 vertex tables (v1, v2);\n")
+	if strings.Count(short, "\n") > 1 {
+		t.Errorf("a short CREATE PROPERTY GRAPH was broken up:\n%s", short)
+	}
+	drop := mustFormat(t, "drop property graph if exists borders cascade;\n")
+	if drop != "drop property graph if exists borders cascade;\n" {
+		t.Errorf("DROP was reshaped:\n%s", drop)
+	}
+}

@@ -886,6 +886,30 @@ func renderRun(toks []Token, col int) []string {
 			continue
 		}
 
+		// A GRAPH_TABLE has its own shape, and more to the point its
+		// path pattern must never be broken at the "-" that opens an
+		// edge -- which is exactly what the binary-operator path does
+		// with it. Take it whole, here, before that can happen.
+		if isGraphTable(toks, i) {
+			close := matchParen(toks, i+1)
+			gt := toks[i : close+1]
+			if prev != nil && spaceBetween(prevPrev, *prev, t) {
+				write(" ")
+			}
+			flat := graphTableJoin(gt)
+			if curCol+cols(flat) <= targetWidth {
+				write(flat)
+			} else if l := layoutGraphTable(gt, curCol); l != nil {
+				merge(l)
+			} else {
+				write(flat)
+			}
+			prevPrev, prev = prev, &toks[close]
+			flushTrailing(close)
+			i = close + 1
+			continue
+		}
+
 		if t.Kind == TokKeyword && t.Lower == "over" && i+1 < len(toks) && toks[i+1].Text == "(" {
 			close := matchParen(toks, i+1)
 			overToks := toks[i : close+1]
