@@ -169,20 +169,22 @@ func layoutGraphTable(toks []Token, col int) []string {
 	if !ok {
 		return nil
 	}
-	inner := col + 2
-	pad := strings.Repeat(" ", inner)
-
 	lines := []string{"graph_table (" + flatJoin(name)}
 
-	// "match " and "columns " are padded to a common width so the pattern
-	// and the projection start in the same column, the way the clause
-	// river works one level up.
-	river := len("columns")
+	// The river here is the open paren itself: GRAPH_TABLE's, MATCH's and
+	// COLUMNS's all line up in one column, so the graph name, the pattern
+	// and the projection start together. "match" and "columns" are
+	// right-padded to reach it, the way clause keywords are one level up.
+	parenCol := col + len("graph_table ")
 	kw := func(w string) string {
-		return pad + strings.Repeat(" ", river-len(w)) + w + " "
+		n := parenCol - 1 - len(w)
+		if n < 0 {
+			n = 0
+		}
+		return strings.Repeat(" ", n) + w + " "
 	}
 
-	patCol := inner + river + 1
+	patCol := parenCol
 	patLines := []string{graphPatternJoin(pattern)}
 	if patCol+cols(patLines[0]) > targetWidth {
 		patLines = breakGraphPattern(pattern, patCol)

@@ -326,10 +326,10 @@ func TestGraphPatternIsNeverBroken(t *testing.T) {
 		{"edge arrow stays whole",
 			"select neighbour from graph_table (borders match (c is country where c.name = 'France')-[is borders]->(n is country) columns (n.name as neighbour)) order by neighbour;\n",
 			[]string{
-				"    from graph_table (borders",
-				"             match (c is country where c.name = 'France')",
-				"                   -[is borders]->(n is country)",
-				"           columns (n.name as neighbour))",
+				"from graph_table (borders",
+				"match (c is country where c.name = 'France')",
+				"-[is borders]->(n is country)",
+				"columns (n.name as neighbour))",
 			}},
 		{"quantifier keeps its braces closed up",
 			"select r from graph_table (borders match (c is country)-[is borders]->{1,4}(n is country) columns (n.name as r)) order by r;\n",
@@ -361,6 +361,39 @@ func TestGraphPatternIsNeverBroken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GRAPH_TABLE's river is the open paren: the ones after "graph_table",
+// "match" and "columns" all line up, so the graph name, the pattern and the
+// projection start in one column. strings.Contains cannot see indentation,
+// so this needs its own test.
+func TestGraphTableParensAlign(t *testing.T) {
+	got := mustFormat(t, "select neighbour from graph_table (borders match (c is country where c.name = 'France')-[is borders]->(n is country) columns (n.name as neighbour)) order by neighbour;\n")
+	want := -1
+	for _, l := range strings.Split(got, "\n") {
+		var kw string
+		switch {
+		case strings.Contains(l, "graph_table ("):
+			kw = "graph_table ("
+		case strings.Contains(l, "match ("):
+			kw = "match ("
+		case strings.Contains(l, "columns ("):
+			kw = "columns ("
+		default:
+			continue
+		}
+		col := strings.Index(l, kw) + len(kw) - 1
+		if want < 0 {
+			want = col
+			continue
+		}
+		if col != want {
+			t.Errorf("%q opens at column %d, want %d:\n%s", kw, col, want, got)
+		}
+	}
+	if want < 0 {
+		t.Fatalf("no GRAPH_TABLE lines found:\n%s", got)
 	}
 }
 
