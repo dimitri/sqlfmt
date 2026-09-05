@@ -1,6 +1,9 @@
 package explain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const simplePlan = `                                    QUERY PLAN
 ═══════════════════════════════════════════════════════════════════════════════════
@@ -154,5 +157,42 @@ func TestParseBareCostsOffPlan(t *testing.T) {
 	}
 	if plan.Root.Type != "seq-scan" || plan.Root.Relation != "drivers" {
 		t.Fatalf("unexpected root: %+v", plan.Root)
+	}
+}
+
+// EXPLAIN (BUFFERS) puts a "Planning:" block, with its own indented
+// Buffers and I/O Timings lines, between the plan tree and the timings.
+// The parser used to stop dead at "Planning:", which silently dropped
+// both Planning Time and Execution Time from every buffered plan — and
+// those timings are half of what a plan comparison reports.
+func TestParseKeepsTimingsAfterPlanningBlock(t *testing.T) {
+	const buffered = ` Limit  (cost=0.14..2.06 rows=10 width=40) (actual time=0.016..0.018 rows=10 loops=1)
+   Buffers: shared hit=1 read=1
+   ->  Index Scan using season_summary_year on season_summary  (cost=0.14..13.16 rows=68 width=40) (actual time=0.016..0.017 rows=10 loops=1)
+         Buffers: shared hit=1 read=1
+ Planning:
+   Buffers: shared hit=61 read=1
+   I/O Timings: shared read=0.009
+ Planning Time: 0.181 ms
+ Execution Time: 0.032 ms
+(11 rows)
+`
+	plan, err := Parse(buffered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.PlanningTime == nil || *plan.PlanningTime != 0.181 {
+		t.Fatalf("planning time = %v, want 0.181", plan.PlanningTime)
+	}
+	if plan.ExecutionTime == nil || *plan.ExecutionTime != 0.032 {
+		t.Fatalf("execution time = %v, want 0.032", plan.ExecutionTime)
+	}
+	// The planning block's own Buffers line must not have been collected
+	// as a property of the deepest plan node.
+	scan := plan.Root.Children[0]
+	for _, p := range scan.Props {
+		if strings.Contains(p, "hit=61") {
+			t.Fatalf("planning-block line leaked into node props: %q", p)
+		}
 	}
 }

@@ -1,115 +1,108 @@
 package explain
 
-import (
-	"sort"
-	"strings"
-)
+import "strings"
 
-// Advice renders a plan's STRUCTURE in the shape PostgreSQL 19's
+// Advice renders a plan's STRUCTURE in the format PostgreSQL 19's
 // pg_plan_advice generates:
 //
-//	JOIN_ORDER(results races drivers)
-//	HASH_JOIN(races drivers)
-//	SEQ_SCAN(results races drivers)
-//	NO_GATHER(results races drivers)
+//	JOIN_ORDER(f d)
+//	MERGE_JOIN_PLAIN(d)
+//	INDEX_SCAN(f join_fact_dim_id d join_dim_pkey)
+//	NO_GATHER(f d)
 //
 // Why mirror a format from a version almost nobody runs yet: because of
-// what the format leaves out. There is no cost in it, no row estimate, no
-// timing — only the decisions the planner made about join order, join
-// method, access method, and parallelism. That makes it the one rendering
-// of a plan that is stable across runs of the same plan, and it is
-// exactly what you need to answer the question a plain diff of two
-// EXPLAIN outputs drowns in noise: did the SHAPE change, or did the
-// numbers just move?
+// what it leaves out. There is no cost in it, no row estimate, no timing
+// — only the decisions the planner made about join order, join method,
+// access method, and parallelism. That makes it the one rendering of a
+// plan that is stable across runs, and therefore the answer to the
+// question a plain diff of two EXPLAIN outputs drowns in noise: did the
+// SHAPE change, or did the numbers just move?
 //
-// PostgreSQL 19 computes this inside the planner, which knows everything.
-// We are reconstructing it from a rendering, on any version back to the
-// ones people are actually running. That difference has consequences, and
-// they are stated rather than papered over:
+// The tag vocabulary, argument conventions and emission order here were
+// read off contrib/pg_plan_advice in the PostgreSQL source rather than
+// guessed: tags from pgpa_cstring_advice_tag() in pgpa_ast.c, the
+// join-strategy distinctions from pgpa_join.c, argument shapes from the
+// module README, and line order from pgpa_output_advice().
 //
-//   - This is a COMPARISON KEY, not a round-trippable advice string. Do
-//     not feed the output to pg_plan_advice and expect it to apply. Text
-//     EXPLAIN does not carry the planner's internal relation identity, so
-//     subqueries, CTEs and repeated aliases can be ambiguous here in ways
-//     they never are inside the planner.
-//   - Relation ordering within a line is ours (join order, see below),
-//     not PostgreSQL's internal ordering. Two plans compared with each
-//     other agree; a line compared byte-for-byte against a real 19 server
-//     may not.
-//   - Join-method variant spellings (19's MERGE_JOIN_PLAIN and friends)
-//     are not reproduced. A merge join is MERGE_JOIN here.
+// # What this can and cannot do
 //
-// Within those limits it does the job it exists for: two plans of the
-// same query produce identical Advice when, and only when, the planner
-// made the same structural decisions.
+// PostgreSQL 19 generates advice inside the planner, which knows the
+// query's whole structure. This reconstructs it from EXPLAIN's rendering
+// of the finished plan, on any version. Most of it survives that
+// translation exactly. Some of it cannot, and the gaps are named rather
+// than papered over:
+//
+//   - Index names are NOT schema-qualified. Real generated advice prints
+//     "public.join_dim_pkey"; text EXPLAIN only ever prints the bare
+//     index name, and the schema is not recoverable from it.
+//   - Relation identifiers carry no @plan_name subquery qualifier and no
+//     /schema.partition qualifier. Both come from planner internals that
+//     EXPLAIN does not print. Repeated aliases DO get 19's #occurrence
+//     numbering, which is recoverable.
+//   - DO_NOT_SCAN, PARTITIONWISE, SEMIJOIN_UNIQUE, SEMIJOIN_NON_UNIQUE
+//     and FOREIGN_JOIN are never emitted. They describe decisions that
+//     leave no distinguishable trace in plan text.
+//   - JOIN_ORDER's "{a b}" unordered-group syntax is never emitted; it
+//     marks joins whose sides are undefined, which is planner knowledge.
+//     Parenthesized groups for non-outer-deep trees ARE emitted, since
+//     tree shape is exactly what EXPLAIN shows.
+//
+// So: this is a COMPARISON KEY, dependable for telling whether two plans
+// of the same query are structurally the same. It is not a
+// round-trippable advice string — do not feed it to pg_plan_advice and
+// expect it to apply.
 func Advice(p *Plan) []AdviceLine {
 	if p == nil || p.Root == nil {
 		return nil
 	}
-	// Join order doubles as this package's canonical relation ordering:
-	// every other line orders its relations by first appearance here, so
-	// the whole block is deterministic for a given tree.
-	order := joinOrder(p.Root)
-	rank := make(map[string]int, len(order))
-	for i, rel := range order {
-		if _, seen := rank[rel]; !seen {
-			rank[rel] = i
-		}
-	}
-	byOrder := func(rels []string) []string {
-		out := dedupe(rels)
-		sort.SliceStable(out, func(i, j int) bool {
-			ri, oki := rank[out[i]]
-			rj, okj := rank[out[j]]
-			switch {
-			case oki && okj:
-				return ri < rj
-			case oki:
-				return true
-			case okj:
-				return false
-			}
-			return out[i] < out[j]
-		})
-		return out
+	names := newNamer()
+	rels := baseRelations(p.Root)
+	for _, n := range rels {
+		names.assign(n)
 	}
 
 	var lines []AdviceLine
-	if rels := dedupe(order); len(rels) > 0 {
-		lines = append(lines, AdviceLine{Kind: "JOIN_ORDER", Relations: rels})
+
+	// Emission order follows pgpa_output_advice(): join order, then join
+	// methods, then scans, then the gather decision.
+	if root := topJoin(p.Root); root != nil {
+		if s := joinOrderTerm(root, names); s != "" {
+			lines = append(lines, AdviceLine{Kind: "JOIN_ORDER", Args: []string{s}})
+		}
+	} else if len(rels) > 0 {
+		lines = append(lines, AdviceLine{Kind: "JOIN_ORDER", Args: names.namesOf(rels)})
 	}
 
-	for _, jm := range joinMethods(p.Root) {
-		lines = append(lines, AdviceLine{Kind: jm.kind, Relations: byOrder(jm.inner)})
+	for _, jm := range joinMethods(p.Root, names) {
+		lines = append(lines, AdviceLine{Kind: jm.kind, Args: jm.args})
+	}
+	for _, sm := range scanStrategies(p.Root, names) {
+		lines = append(lines, AdviceLine{Kind: sm.kind, Args: sm.args})
 	}
 
-	for _, sm := range scanMethods(p.Root) {
-		lines = append(lines, AdviceLine{Kind: sm.kind, Relations: byOrder(sm.rels)})
-	}
-
-	gather := "NO_GATHER"
-	if hasGather(p.Root) {
-		gather = "GATHER"
-	}
-	if rels := dedupe(order); len(rels) > 0 {
-		lines = append(lines, AdviceLine{Kind: gather, Relations: rels})
+	// GATHER/GATHER_MERGE name what runs in parallel; NO_GATHER names
+	// everything when nothing does.
+	gathered, gatherKind := gatherScans(p.Root, names)
+	if len(gathered) > 0 {
+		lines = append(lines, AdviceLine{Kind: gatherKind, Args: gathered})
+	} else if len(rels) > 0 {
+		lines = append(lines, AdviceLine{Kind: "NO_GATHER", Args: names.namesOf(rels)})
 	}
 	return lines
 }
 
-// AdviceLine is one line of the advice block: a decision kind and the
-// relations it applies to.
+// AdviceLine is one advice item: a tag applied to a list of targets.
 type AdviceLine struct {
-	Kind      string // "JOIN_ORDER", "HASH_JOIN", "SEQ_SCAN", "NO_GATHER", ...
-	Relations []string
+	Kind string   // "JOIN_ORDER", "HASH_JOIN", "SEQ_SCAN", "NO_GATHER", ...
+	Args []string // targets, already rendered (a group is one "(a b)" arg)
 }
 
 func (l AdviceLine) String() string {
-	return l.Kind + "(" + strings.Join(l.Relations, " ") + ")"
+	return l.Kind + "(" + strings.Join(l.Args, " ") + ")"
 }
 
-// AdviceString renders Advice as the multi-line block, one decision per
-// line, without a trailing newline.
+// AdviceString renders Advice as the multi-line block, one item per line,
+// without a trailing newline.
 func AdviceString(p *Plan) string {
 	lines := Advice(p)
 	out := make([]string, 0, len(lines))
@@ -119,54 +112,76 @@ func AdviceString(p *Plan) string {
 	return strings.Join(out, "\n")
 }
 
-// relName is how a base relation is named throughout the advice block:
-// its alias when the query gave it one, else the relation itself. The
-// alias is preferred because it is what distinguishes two scans of the
-// same table in a self-join — exactly the case where using the bare
-// relation name would collapse two different decisions into one.
-func relName(n *Node) string {
-	if n.Alias != "" {
-		return n.Alias
-	}
-	return n.Relation
+// namer assigns 19's relation identifiers. The README's general form is
+// alias#occurrence/schema.partition@plan; of those, alias and occurrence
+// are recoverable from plan text and the rest are not. Occurrence numbers
+// start at 1 and the first is omitted, so a self-join reads "foo foo#2".
+type namer struct {
+	seen  map[string]int
+	byPtr map[*Node]string
 }
 
-// isBaseRelation reports whether n reads a named relation, i.e. whether
-// it contributes a name to the advice block. Nodes with no relation of
-// their own (Sort, Hash, Aggregate, ...) never do.
+func newNamer() *namer {
+	return &namer{seen: map[string]int{}, byPtr: map[*Node]string{}}
+}
+
+func (nm *namer) assign(n *Node) string {
+	if s, ok := nm.byPtr[n]; ok {
+		return s
+	}
+	base := n.Relation
+	if n.Alias != "" {
+		base = n.Alias
+	}
+	nm.seen[base]++
+	s := base
+	if c := nm.seen[base]; c > 1 {
+		s = base + "#" + itoa(c)
+	}
+	nm.byPtr[n] = s
+	return s
+}
+
+func (nm *namer) nameOf(n *Node) string { return nm.byPtr[n] }
+
+func (nm *namer) namesOf(ns []*Node) []string {
+	out := make([]string, 0, len(ns))
+	for _, n := range ns {
+		if s := nm.byPtr[n]; s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func itoa(i int) string {
+	if i < 10 {
+		return string(rune('0' + i))
+	}
+	return itoa(i/10) + string(rune('0'+i%10))
+}
+
+// isBaseRelation reports whether n contributes a relation identifier.
 //
-// Bitmap Index Scan is the exception that has to be spelled out. It
-// prints as "Bitmap Index Scan on <index>", so the parser stores the
-// INDEX name in Relation — the only node type where that field is not a
-// relation at all. Left in, an index name shows up as a participant in
-// JOIN_ORDER, which is both wrong and confusing. The Bitmap Heap Scan
-// directly above it already contributes the real relation.
+// Bitmap Index Scan is excluded deliberately: it prints "on <index>", so
+// the parser stores an INDEX name in Relation — the only node type where
+// that field is not a relation. The Bitmap Heap Scan above it names the
+// real table, and 19's BITMAP_HEAP_SCAN tag takes no index argument.
 func isBaseRelation(n *Node) bool {
 	return n.Relation != "" && n.Type != "bitmap-index-scan"
 }
 
-// isJoin reports whether n is a join node.
-func isJoin(n *Node) bool {
-	switch n.Type {
-	case "hash-join", "nested-loop", "merge-join":
-		return true
-	}
-	return false
-}
-
-// joinOrder walks the tree outer-side-first, collecting base relations in
-// the order the joins bring them in. For the usual left-deep tree that
-// puts the driving relation first and each joined relation after it,
-// which is what 19's JOIN_ORDER line reports.
-func joinOrder(n *Node) []string {
-	var out []string
+// baseRelations lists the relation-bearing nodes in plan order (outer
+// side first), which is also the order 19 lists them in JOIN_ORDER.
+func baseRelations(n *Node) []*Node {
+	var out []*Node
 	var walk func(*Node)
 	walk = func(n *Node) {
 		if n == nil {
 			return
 		}
 		if isBaseRelation(n) {
-			out = append(out, relName(n))
+			out = append(out, n)
 		}
 		for _, c := range n.Children {
 			walk(c)
@@ -176,23 +191,139 @@ func joinOrder(n *Node) []string {
 	return out
 }
 
-type joinMethod struct {
-	kind  string
-	inner []string
+func isJoin(n *Node) bool {
+	switch n.Type {
+	case "hash-join", "nested-loop", "merge-join":
+		return true
+	}
+	return false
 }
 
-// joinMethods collects one entry per join node, naming the relations on
-// that join's INNER side — the side 19's HASH_JOIN(...)/MERGE_JOIN(...)
-// lines name. Deepest join first, so the ordering is stable regardless of
-// how the tree is nested.
-//
-// The inner side is read through whatever the join builds on it: a Hash
-// Join's inner child is the Hash node, not the scan under it, and a merge
-// join's inner side is routinely a Sort. Those wrappers carry no relation
-// of their own, so descending through them lands on the relations that
-// matter.
-func joinMethods(root *Node) []joinMethod {
-	var out []joinMethod
+// topJoin finds the outermost join node, the root of the join problem.
+func topJoin(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+	if isJoin(n) {
+		return n
+	}
+	for _, c := range n.Children {
+		if j := topJoin(c); j != nil {
+			return j
+		}
+	}
+	return nil
+}
+
+// joinOrderTerm renders a join subtree the way JOIN_ORDER wants it. The
+// canonical structure is an outer-deep tree, written flat: JOIN_ORDER(t1
+// t2 t3) means t1 is the driving table, joined to t2 and then to t3. A
+// subtree that is NOT outer-deep — a join on the inner side — is
+// parenthesized, per the README's JOIN_ORDER(t1 (t2 t3)).
+func joinOrderTerm(n *Node, names *namer) string {
+	parts := joinOrderParts(n, names)
+	return strings.Join(parts, " ")
+}
+
+func joinOrderParts(n *Node, names *namer) []string {
+	if n == nil {
+		return nil
+	}
+	if !isJoin(n) {
+		// A non-join node contributes whatever relations hang under it,
+		// in order; Sort/Hash/Aggregate wrappers are transparent here.
+		return names.namesOf(baseRelations(n))
+	}
+	if len(n.Children) < 2 {
+		return names.namesOf(baseRelations(n))
+	}
+	outer := joinOrderParts(n.Children[0], names)
+	innerNode := joinInner(n)
+	var inner []string
+	if innerNode != nil && isJoin(innerNode) {
+		// Inner-side join: a bushy tree, which gets its own parentheses.
+		inner = []string{"(" + joinOrderTerm(innerNode, names) + ")"}
+	} else {
+		inner = names.namesOf(baseRelations(n.Children[1]))
+	}
+	return append(outer, inner...)
+}
+
+// joinInner returns the node that really sits on a join's inner side,
+// seeing through the wrappers the executor puts there. pgpa_join.c does
+// the same descent: a Hash Join's inner child is always a Hash, a merge
+// join's inner is routinely Sort or Incremental Sort, and Material and
+// Memoize wrap the inner side of nested loops.
+func joinInner(n *Node) *Node {
+	if len(n.Children) < 2 {
+		return nil
+	}
+	cur := n.Children[1]
+	for cur != nil {
+		switch cur.Type {
+		case "hash", "sort", "incremental-sort", "materialize", "memoize":
+			if len(cur.Children) == 0 {
+				return cur
+			}
+			cur = cur.Children[0]
+			continue
+		}
+		return cur
+	}
+	return nil
+}
+
+// joinStrategy names the join method tag, making the same PLAIN /
+// MATERIALIZE / MEMOIZE distinction pgpa_join.c makes from the node
+// directly beneath the join on its inner side. Merge joins look past a
+// Sort first, since sorting the inner input is orthogonal to whether it
+// was also materialized.
+func joinStrategy(n *Node) string {
+	inner := (*Node)(nil)
+	if len(n.Children) >= 2 {
+		inner = n.Children[1]
+	}
+	switch n.Type {
+	case "hash-join":
+		return "HASH_JOIN"
+	case "merge-join":
+		for inner != nil && (inner.Type == "sort" || inner.Type == "incremental-sort") {
+			if len(inner.Children) == 0 {
+				break
+			}
+			inner = inner.Children[0]
+		}
+		if inner != nil && inner.Type == "materialize" {
+			return "MERGE_JOIN_MATERIALIZE"
+		}
+		return "MERGE_JOIN_PLAIN"
+	case "nested-loop":
+		if inner != nil {
+			switch inner.Type {
+			case "materialize":
+				return "NESTED_LOOP_MATERIALIZE"
+			case "memoize":
+				return "NESTED_LOOP_MEMOIZE"
+			}
+		}
+		return "NESTED_LOOP_PLAIN"
+	}
+	return ""
+}
+
+type strategyLine struct {
+	kind string
+	args []string
+}
+
+// joinMethods emits one advice item per join method used, naming what
+// sits on each join's INNER side. Per the README: for an N-table join
+// problem there are N-1 join-method items, and the outermost table needs
+// none, because a method tag says "this belongs on the inner side of a
+// join of this kind".
+func joinMethods(root *Node, names *namer) []strategyLine {
+	var out []strategyLine
+	idx := map[string]int{}
 	var walk func(*Node)
 	walk = func(n *Node) {
 		if n == nil {
@@ -204,73 +335,63 @@ func joinMethods(root *Node) []joinMethod {
 		if !isJoin(n) || len(n.Children) < 2 {
 			return
 		}
-		kind := ""
-		switch n.Type {
-		case "hash-join":
-			kind = "HASH_JOIN"
-		case "nested-loop":
-			kind = "NESTED_LOOP"
-		case "merge-join":
-			kind = "MERGE_JOIN"
-		}
-		inner := joinOrder(n.Children[1])
-		if len(inner) == 0 {
+		kind := joinStrategy(n)
+		if kind == "" {
 			return
 		}
-		out = append(out, joinMethod{kind: kind, inner: inner})
+		innerRels := baseRelations(n.Children[1])
+		if len(innerRels) == 0 {
+			return
+		}
+		var arg string
+		if inner := joinInner(n); inner != nil && isJoin(inner) {
+			// The inner side is itself a join: one grouped target, as in
+			// the README's NESTED_LOOP_PLAIN(x (y z)).
+			arg = "(" + strings.Join(names.namesOf(innerRels), " ") + ")"
+		} else {
+			arg = strings.Join(names.namesOf(innerRels), " ")
+		}
+		if arg == "" {
+			return
+		}
+		if i, ok := idx[kind]; ok {
+			out[i].args = append(out[i].args, arg)
+			return
+		}
+		idx[kind] = len(out)
+		out = append(out, strategyLine{kind: kind, args: []string{arg}})
 	}
 	walk(root)
+	return out
+}
 
-	// Merge entries sharing a kind into one line, as 19 does: two hash
-	// joins in one plan produce a single HASH_JOIN(...) naming both inner
-	// sides, not two lines.
-	var merged []joinMethod
-	idx := map[string]int{}
-	for _, jm := range out {
-		if i, ok := idx[jm.kind]; ok {
-			merged[i].inner = append(merged[i].inner, jm.inner...)
-			continue
-		}
-		idx[jm.kind] = len(merged)
-		merged = append(merged, jm)
+// scanTag maps a parsed node type to 19's scan advice tag. The list is
+// deliberately short and matches pgpa_ast.c: most scan types get no
+// advice at all, because there is only one way to perform them. A
+// subquery is always scanned with a subquery scan, so there is nothing
+// to advise.
+func scanTag(typ string) string {
+	switch typ {
+	case "seq-scan":
+		return "SEQ_SCAN"
+	case "index-scan":
+		return "INDEX_SCAN"
+	case "index-only-scan":
+		return "INDEX_ONLY_SCAN"
+	case "bitmap-heap-scan":
+		return "BITMAP_HEAP_SCAN"
+	case "tid-scan":
+		return "TID_SCAN"
 	}
-	return merged
+	return ""
 }
 
-type scanMethod struct {
-	kind string
-	rels []string
-}
-
-// scanMethodKind maps a parsed node type to its advice keyword. Only node
-// types that actually read a relation appear; anything else returns "".
-var scanMethodKind = map[string]string{
-	"seq-scan":              "SEQ_SCAN",
-	"index-scan":            "INDEX_SCAN",
-	"index-only-scan":       "INDEX_ONLY_SCAN",
-	"bitmap-heap-scan":      "BITMAP_HEAP_SCAN",
-	"tid-scan":              "TID_SCAN",
-	"tid-range-scan":        "TID_RANGE_SCAN",
-	"sample-scan":           "SAMPLE_SCAN",
-	"foreign-scan":          "FOREIGN_SCAN",
-	"custom-scan":           "CUSTOM_SCAN",
-	"function-scan":         "FUNCTION_SCAN",
-	"table-function-scan":   "TABLE_FUNCTION_SCAN",
-	"values-scan":           "VALUES_SCAN",
-	"subquery-scan":         "SUBQUERY_SCAN",
-	"cte-scan":              "CTE_SCAN",
-	"worktable-scan":        "WORKTABLE_SCAN",
-	"named-tuplestore-scan": "NAMED_TUPLESTORE_SCAN",
-}
-
-// scanMethods groups base relations by how they are read, one line per
-// access method, in first-appearance order of the method itself.
-//
-// Bitmap Index Scan is deliberately absent: it names the index, and the
-// Bitmap Heap Scan above it already names the relation, so counting both
-// would name the same access path twice.
-func scanMethods(root *Node) []scanMethod {
-	var out []scanMethod
+// scanStrategies groups relations by how they are read. Index and
+// index-only scans name the index as well as the relation, in
+// relation/index pairs — INDEX_SCAN(foo foo_a_idx bar bar_b_idx) — while
+// bitmap heap scans take no index, matching the README.
+func scanStrategies(root *Node, names *namer) []strategyLine {
+	var out []strategyLine
 	idx := map[string]int{}
 	var walk func(*Node)
 	walk = func(n *Node) {
@@ -278,14 +399,17 @@ func scanMethods(root *Node) []scanMethod {
 			return
 		}
 		if isBaseRelation(n) {
-			if kind, ok := scanMethodKind[n.Type]; ok {
-				i, seen := idx[kind]
-				if !seen {
+			if tag := scanTag(n.Type); tag != "" {
+				i, ok := idx[tag]
+				if !ok {
 					i = len(out)
-					idx[kind] = i
-					out = append(out, scanMethod{kind: kind})
+					idx[tag] = i
+					out = append(out, strategyLine{kind: tag})
 				}
-				out[i].rels = append(out[i].rels, relName(n))
+				out[i].args = append(out[i].args, names.nameOf(n))
+				if n.Index != "" && (tag == "INDEX_SCAN" || tag == "INDEX_ONLY_SCAN") {
+					out[i].args = append(out[i].args, n.Index)
+				}
 			}
 		}
 		for _, c := range n.Children {
@@ -296,33 +420,35 @@ func scanMethods(root *Node) []scanMethod {
 	return out
 }
 
-// hasGather reports whether any part of the plan runs in parallel, which
-// decides between the GATHER and NO_GATHER lines.
-func hasGather(n *Node) bool {
-	if n == nil {
-		return false
-	}
-	if n.Type == "gather" || n.Type == "gather-merge" {
-		return true
-	}
-	for _, c := range n.Children {
-		if hasGather(c) {
-			return true
+// gatherScans reports what runs in parallel. A Gather covering a join
+// product is one grouped target — 19 prints GATHER((f d)) — while
+// separate Gathers over separate relations print as GATHER(f d).
+func gatherScans(root *Node, names *namer) ([]string, string) {
+	var args []string
+	kind := "GATHER"
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == "gather" || n.Type == "gather-merge" {
+			if n.Type == "gather-merge" {
+				kind = "GATHER_MERGE"
+			}
+			rels := names.namesOf(baseRelations(n))
+			switch {
+			case len(rels) == 0:
+			case len(rels) == 1:
+				args = append(args, rels[0])
+			default:
+				args = append(args, "("+strings.Join(rels, " ")+")")
+			}
+			return
+		}
+		for _, c := range n.Children {
+			walk(c)
 		}
 	}
-	return false
-}
-
-// dedupe removes repeats while keeping first-appearance order.
-func dedupe(in []string) []string {
-	seen := make(map[string]bool, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" || seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
+	walk(root)
+	return args, kind
 }

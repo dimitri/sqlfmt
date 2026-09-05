@@ -45,47 +45,70 @@ $ sqlfmt -l queries/**/*.sql    # list files whose formatting would change
 $ sqlfmt -d query.sql           # show a unified diff instead of full output
 $ cat query.sql | sqlfmt        # stdin -> stdout, pipeable
 $ sqlfmt -V                     # print the version and exit
-$ sqlfmt -advice plan.txt       # input is EXPLAIN output: print its plan advice
 ```
 
-### Plan advice
+### Working on EXPLAIN output
 
-`-advice` switches the input from SQL to **EXPLAIN output**, and prints a
-description of the plan's *structure*, in the format PostgreSQL 19's
-`pg_plan_advice` generates:
+The top-level command formats SQL, including `EXPLAIN` *statements*. The
+`explain` subcommand works on EXPLAIN *output* — the plan text a server
+printed:
 
 ```console
-$ psql -c 'explain (analyze, buffers) select ...' > plan.txt
-$ sqlfmt -advice plan.txt
-JOIN_ORDER(results races drivers)
-HASH_JOIN(races drivers)
-SEQ_SCAN(results races drivers)
-NO_GATHER(results races drivers)
+$ sqlfmt explain advice plan.txt          # the plan's structure, as plan advice
+$ sqlfmt explain diff before.txt after.txt # what changed between two plans
+```
+
+`explain advice` prints a description of the plan's *structure* in the
+format PostgreSQL 19's `pg_plan_advice` generates:
+
+```console
+$ sqlfmt explain advice plan.txt
+JOIN_ORDER(f d)
+MERGE_JOIN_PLAIN(d)
+INDEX_SCAN(f join_fact_dim_id d join_dim_pkey)
+NO_GATHER(f d)
 ```
 
 The useful property is what the format leaves out. There is no cost in it,
-no row estimate, no timing — only the four decisions the planner made:
-join order, join method, access method, and parallelism. That makes it the
-one rendering of a plan that is stable across runs, which is what you need
-to answer the question a plain `diff` of two EXPLAIN outputs drowns in
-noise: **did the shape change, or did the numbers just move?**
+no row estimate, no timing — only the decisions the planner made: join
+order, join method, access method, parallelism. That makes it the one
+rendering of a plan that is stable across runs.
+
+Which is what `explain diff` is built on. A plain `diff` of two EXPLAIN
+outputs is useless, because every line carries a cost or a timing so every
+line differs, and the one change that explains the difference is buried in
+noise. Comparing the advice instead sidesteps that — and sidesteps having
+to align nodes between two differently-shaped trees, since advice is keyed
+by tag rather than by position:
 
 ```console
-$ diff <(sqlfmt -advice before.txt) <(sqlfmt -advice after.txt)
+$ sqlfmt explain diff before.txt after.txt
+STRUCTURE (2 changes)
+  - SEQ_SCAN(geoname)
+  + INDEX_SCAN(geoname geoname_name)
+
+NUMBERS
+  execution time     18.245 ms →     0.049 ms   (-99.7%)
+  planning time       0.301 ms →     0.306 ms   (+1.7%)
 ```
 
-PostgreSQL 19 computes this inside the planner. `sqlfmt` reconstructs it
-from the plan text, so it works on the version you are actually running,
-and on plain text EXPLAIN rather than only `FORMAT JSON` — because pasted
-text is what people have. Within limits documented in `explain/advice.go`
-and worth reading before relying on it: this is a **comparison key, not a
-round-trippable advice string**, relation ordering within a line is
-`sqlfmt`'s own rather than PostgreSQL's, and 19's join-method variant
-spellings are not reproduced.
+Numbers are reported, but separately and always labelled as such; they are
+never mixed into the structural comparison. `explain diff` exits 0 when the
+two plans are structurally identical and 1 when they are not, so it
+composes into scripts and CI.
 
-Plans are accepted with or without costs (`COSTS OFF` included), with or
-without psql's `QUERY PLAN` header and box-drawing borders, and with any
-leading statement echoes or trailing `(N rows)` footer left in place.
+Plans are read in psql's default TEXT format — with or without `ANALYZE`,
+with or without costs (`COSTS OFF` included), with or without the
+`QUERY PLAN` header, box-drawing borders, leading statement echoes or a
+trailing `(N rows)`. TEXT rather than `FORMAT JSON` because pasted text is
+what people actually have.
+
+PostgreSQL 19 computes advice inside the planner; `sqlfmt` reconstructs it
+from plan text, so it works on the version you are running. The known
+differences from real generated advice are listed in `explain/advice.go`
+and worth reading before relying on it — chiefly that index names are not
+schema-qualified, and that this is a **comparison key, not a
+round-trippable advice string**.
 
 As a library: `import "github.com/dimitri/sqlfmt/format"` (module path TBD —
 not yet published), `format.Format(io.Reader) (string, error)`, so callers
@@ -258,7 +281,9 @@ explain/                   — package explain, EXPLAIN *output* (not the EXPLAI
   format.go                — FormatForWidth, reflow for fixed-width media
   advice.go                — Advice: plan structure in PostgreSQL 19's
                              pg_plan_advice format, derived on any version
-cmd/sqlfmt/main.go         — the CLI binary
+  diff.go                  — DiffPlans: structural comparison of two plans
+cmd/sqlfmt/main.go         — the CLI binary (formatter; gofmt-style flags)
+cmd/sqlfmt/explaincmd.go   — the "explain" subcommand namespace
 wasm/main.go                — WebAssembly build (globalThis.sqlfmt.format), see "WebAssembly build"
 wasm/smoketest.mjs          — Node smoke test for the built wasm module
 wasm/compress.mjs           — produces sqlfmt.wasm.gz from the built module

@@ -41,6 +41,7 @@ type Node struct {
 	Label        string // display-label override (join variants keep their full text)
 	Relation     string // table/index name, scan nodes only
 	Alias        string // "" when absent or identical to Relation
+	Index        string // index name on "Index Scan using IDX on REL" nodes
 	CostStart    *float64
 	CostEnd      *float64
 	RowsEstimate *int64
@@ -152,8 +153,9 @@ func Parse(out string) (*Plan, error) {
 
 // extractPlanLines finds the plan inside whatever psql printed: it skips
 // any leading statement echoes and the "QUERY PLAN" header, strips
-// exactly one leading space from every collected line, and stops at the
-// first footer line (Planning:/Planning Time:/Execution Time:/"(N rows)").
+// exactly one leading space from every collected line, keeps the
+// Planning Time / Execution Time lines, and stops at the "(N rows)"
+// footer.
 //
 // Two entry rules, because there are two kinds of plan text. Normally the
 // first "(cost=" line begins the plan, which skips echoes and the header
@@ -171,6 +173,7 @@ func extractPlanLines(out string) []string {
 
 	var result []string
 	collecting := false
+	inPlanningBlock := false
 	sawHeader := false
 	hasHeader := strings.Contains(out, "QUERY PLAN")
 
@@ -208,11 +211,26 @@ func extractPlanLines(out string) []string {
 			}
 		}
 
-		if trimmed == "Planning:" || rowsFooterRE.MatchString(trimmed) {
+		if rowsFooterRE.MatchString(trimmed) {
 			break
 		}
+		// EXPLAIN (BUFFERS) prints a "Planning:" block, with its own
+		// indented Buffers/I/O Timings lines, BETWEEN the tree and the
+		// Planning Time / Execution Time lines. Stopping at "Planning:"
+		// (which this did) therefore threw both timings away on every
+		// buffered plan — invisible when the tree was all anyone wanted,
+		// but the timings are half of what a plan comparison reports.
+		// Skip the block's contents, keep scanning for the timings.
+		if trimmed == "Planning:" {
+			inPlanningBlock = true
+			continue
+		}
 		if planningTimeRE.MatchString(trimmed) || executionTimeRE.MatchString(trimmed) {
+			inPlanningBlock = false
 			result = append(result, line)
+			continue
+		}
+		if inPlanningBlock {
 			continue
 		}
 		if separatorRE.MatchString(line) {
@@ -256,8 +274,28 @@ func parseNodeLine(text string) *Node {
 	node.Label = label
 	if relAndAlias != "" {
 		node.Relation, node.Alias = parseRelationAndAlias(relAndAlias)
+		node.Index = parseIndexName(relAndAlias)
 	}
 	return node
+}
+
+// parseIndexName pulls the index out of "using INDEX on RELATION", the
+// shape index and index-only scans print. PostgreSQL 19's plan advice
+// names both the relation and the index it was reached through
+// (INDEX_SCAN(foo foo_a_idx)), so unlike the original book-typesetting
+// parser — which only ever needed the relation and threw this away — the
+// index name has to survive parsing.
+func parseIndexName(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "using ") {
+		return ""
+	}
+	s = s[len("using "):]
+	idx := strings.Index(s, " on ")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[:idx])
 }
 
 // parseRelationAndAlias handles the two shapes psql prints after a scan

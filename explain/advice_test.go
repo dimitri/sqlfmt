@@ -54,8 +54,8 @@ func TestAdviceMergeJoinThroughSortAndAliases(t *testing.T) {
 	}
 	got := AdviceString(plan)
 	want := "JOIN_ORDER(d res)\n" +
-		"MERGE_JOIN(res)\n" +
-		"INDEX_SCAN(d)\n" +
+		"MERGE_JOIN_PLAIN(res)\n" +
+		"INDEX_SCAN(d idx_49514_primary)\n" +
 		"SEQ_SCAN(res)\n" +
 		"NO_GATHER(d res)"
 	if got != want {
@@ -118,7 +118,7 @@ func TestAdviceDetectsScanMethodChange(t *testing.T) {
 	if wantB := "JOIN_ORDER(drivers)\nSEQ_SCAN(drivers)\nNO_GATHER(drivers)"; gotB != wantB {
 		t.Fatalf("before advice = %q, want %q", gotB, wantB)
 	}
-	if wantA := "JOIN_ORDER(drivers)\nINDEX_SCAN(drivers)\nNO_GATHER(drivers)"; gotA != wantA {
+	if wantA := "JOIN_ORDER(drivers)\nINDEX_SCAN(drivers drivers_nationality)\nNO_GATHER(drivers)"; gotA != wantA {
 		t.Fatalf("after advice = %q, want %q", gotA, wantA)
 	}
 }
