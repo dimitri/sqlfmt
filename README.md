@@ -45,7 +45,47 @@ $ sqlfmt -l queries/**/*.sql    # list files whose formatting would change
 $ sqlfmt -d query.sql           # show a unified diff instead of full output
 $ cat query.sql | sqlfmt        # stdin -> stdout, pipeable
 $ sqlfmt -V                     # print the version and exit
+$ sqlfmt -advice plan.txt       # input is EXPLAIN output: print its plan advice
 ```
+
+### Plan advice
+
+`-advice` switches the input from SQL to **EXPLAIN output**, and prints a
+description of the plan's *structure*, in the format PostgreSQL 19's
+`pg_plan_advice` generates:
+
+```console
+$ psql -c 'explain (analyze, buffers) select ...' > plan.txt
+$ sqlfmt -advice plan.txt
+JOIN_ORDER(results races drivers)
+HASH_JOIN(races drivers)
+SEQ_SCAN(results races drivers)
+NO_GATHER(results races drivers)
+```
+
+The useful property is what the format leaves out. There is no cost in it,
+no row estimate, no timing — only the four decisions the planner made:
+join order, join method, access method, and parallelism. That makes it the
+one rendering of a plan that is stable across runs, which is what you need
+to answer the question a plain `diff` of two EXPLAIN outputs drowns in
+noise: **did the shape change, or did the numbers just move?**
+
+```console
+$ diff <(sqlfmt -advice before.txt) <(sqlfmt -advice after.txt)
+```
+
+PostgreSQL 19 computes this inside the planner. `sqlfmt` reconstructs it
+from the plan text, so it works on the version you are actually running,
+and on plain text EXPLAIN rather than only `FORMAT JSON` — because pasted
+text is what people have. Within limits documented in `explain/advice.go`
+and worth reading before relying on it: this is a **comparison key, not a
+round-trippable advice string**, relation ordering within a line is
+`sqlfmt`'s own rather than PostgreSQL's, and 19's join-method variant
+spellings are not reproduced.
+
+Plans are accepted with or without costs (`COSTS OFF` included), with or
+without psql's `QUERY PLAN` header and box-drawing borders, and with any
+leading statement echoes or trailing `(N rows)` footer left in place.
 
 As a library: `import "github.com/dimitri/sqlfmt/format"` (module path TBD —
 not yet published), `format.Format(io.Reader) (string, error)`, so callers
@@ -210,6 +250,14 @@ format/                    — package format, the library (import "github.com/d
   comments.go              — comment attachment, reflow, and C-style block rewrap (rule 18)
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
+explain/                   — package explain, EXPLAIN *output* (not the EXPLAIN
+                             statement, which format/ handles) — import
+                             "github.com/dimitri/sqlfmt/explain"
+  parse.go                 — psql TEXT-format plan text -> Node/Plan tree
+  nodetype.go              — node-type vocabulary and classification
+  format.go                — FormatForWidth, reflow for fixed-width media
+  advice.go                — Advice: plan structure in PostgreSQL 19's
+                             pg_plan_advice format, derived on any version
 cmd/sqlfmt/main.go         — the CLI binary
 wasm/main.go                — WebAssembly build (globalThis.sqlfmt.format), see "WebAssembly build"
 wasm/smoketest.mjs          — Node smoke test for the built wasm module

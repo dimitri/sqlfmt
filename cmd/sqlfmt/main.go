@@ -12,6 +12,7 @@ import (
 
 	"github.com/pmezard/go-difflib/difflib"
 
+	"github.com/dimitri/sqlfmt/explain"
 	"github.com/dimitri/sqlfmt/format"
 )
 
@@ -23,6 +24,7 @@ var (
 	write      = flag.Bool("w", false, "write result to (source) file instead of stdout")
 	list       = flag.Bool("l", false, "list files whose formatting differs from sqlfmt's")
 	doDiff     = flag.Bool("d", false, "display diffs instead of rewriting files")
+	advice     = flag.Bool("advice", false, "input is EXPLAIN output: print its plan advice")
 	showVer    = flag.Bool("V", false, "print version and exit")
 	showVerLon = flag.Bool("version", false, "print version and exit")
 )
@@ -92,10 +94,30 @@ func report(err error) {
 	fmt.Fprintln(os.Stderr, err)
 }
 
+// adviceOutput renders src's plan advice. Kept behind an explicit -advice
+// flag rather than sniffing the input with explain.HasPlan: a formatter
+// that silently switches to a different job because it thought it
+// recognized the input is a formatter you cannot script against.
+func adviceOutput(src []byte, name string) error {
+	plan, err := explain.Parse(string(src))
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	out := explain.AdviceString(plan)
+	if out == "" {
+		return fmt.Errorf("%s: no plan advice could be derived", name)
+	}
+	_, err = fmt.Println(out)
+	return err
+}
+
 func processReader(r io.Reader, name string) error {
 	src, err := io.ReadAll(r)
 	if err != nil {
 		return err
+	}
+	if *advice {
+		return adviceOutput(src, name)
 	}
 	formatted, err := format.Format(bytes.NewReader(src))
 	if err != nil {
@@ -119,6 +141,9 @@ func processFile(path string) error {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	if *advice {
+		return adviceOutput(src, path)
 	}
 	formatted, err := format.Format(bytes.NewReader(src))
 	if err != nil {
