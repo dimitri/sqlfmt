@@ -28,6 +28,13 @@ type Diff struct {
 	Structural []AdviceChange // structural differences, empty when the shape held
 	Before     *Plan
 	After      *Plan
+
+	// BeforeName and AfterName label the two sides in the ---/+++ header,
+	// the way diff(1) names its files. Empty falls back to "before" and
+	// "after", so a caller comparing two in-memory plans still gets a
+	// well-formed header.
+	BeforeName string
+	AfterName  string
 }
 
 // AdviceChange is one structural difference: an advice tag whose targets
@@ -82,36 +89,81 @@ func DiffPlans(before, after *Plan) *Diff {
 	return d
 }
 
-// String renders the diff for a terminal.
+// String renders the diff as unified-diff text.
+//
+// Unified diff rather than a bespoke layout, because the format is the
+// interoperability. Every pager, editor, review tool and syntax
+// highlighter already colours "-" and "+" lines, so this output drops
+// into `less -R`, `delta`, `bat`, a GitHub comment or a typeset listing
+// and comes out looking right with nothing else being taught how. A
+// custom shape would have to earn all of that back, and would still not
+// compose with anything.
+//
+// The ---/+++ header names what was compared, which a diff that omits it
+// leaves the reader to remember. The "@@ plan structure @@" hunk header
+// says which of the two questions this section answers.
+//
+// The timing lines are ordinary context lines, deliberately: they are
+// reported alongside the structural comparison and must never be mistaken
+// for part of it, and context is exactly the unified-diff idea of "shown,
+// not changed".
 func (d *Diff) String() string {
+	beforeName, afterName := d.BeforeName, d.AfterName
+	if beforeName == "" {
+		beforeName = "before"
+	}
+	if afterName == "" {
+		afterName = "after"
+	}
+
 	var b strings.Builder
+	fmt.Fprintf(&b, "--- %s\n", beforeName)
+	fmt.Fprintf(&b, "+++ %s\n", afterName)
+	b.WriteString("@@ plan structure @@\n")
 
 	if d.SameStructure() {
-		b.WriteString("structure unchanged — the planner made the same decisions\n")
+		b.WriteString(" structure unchanged - the planner made the same decisions\n")
 	} else {
-		fmt.Fprintf(&b, "STRUCTURE (%s)\n", plural(len(d.Structural), "change", "changes"))
 		for _, c := range d.Structural {
 			if c.Before != "" {
-				fmt.Fprintf(&b, "  - %s\n", c.Before)
+				fmt.Fprintf(&b, "-%s\n", c.Before)
 			}
 			if c.After != "" {
-				fmt.Fprintf(&b, "  + %s\n", c.After)
+				fmt.Fprintf(&b, "+%s\n", c.After)
 			}
 		}
 	}
 
-	var nums []string
+	if nums := d.numberLines(); len(nums) > 0 {
+		b.WriteString("\n")
+		for _, line := range nums {
+			fmt.Fprintf(&b, " %s\n", line)
+		}
+	}
+	return b.String()
+}
+
+// numberLines renders the timing comparison, or nothing at all when
+// either plan came from an EXPLAIN without ANALYZE. Inventing a zero for
+// a missing timing would read as a catastrophic change.
+func (d *Diff) numberLines() []string {
+	var out []string
 	if s := deltaMS("execution time", execTime(d.Before), execTime(d.After)); s != "" {
-		nums = append(nums, s)
+		out = append(out, s)
 	}
 	if s := deltaMS("planning time", planTime(d.Before), planTime(d.After)); s != "" {
-		nums = append(nums, s)
+		out = append(out, s)
 	}
-	if len(nums) > 0 {
-		b.WriteString("\nNUMBERS\n")
-		for _, n := range nums {
-			fmt.Fprintf(&b, "  %s\n", n)
-		}
+	return out
+}
+
+// AdviceText renders one plan's structure as plain text — the same
+// vocabulary the diff compares, for showing a single plan on its own.
+func AdviceText(p *Plan) string {
+	var b strings.Builder
+	for _, l := range Advice(p) {
+		b.WriteString(l.String())
+		b.WriteString("\n")
 	}
 	return b.String()
 }
@@ -139,7 +191,7 @@ func deltaMS(label string, before, after *float64) string {
 		return ""
 	}
 	b, a := *before, *after
-	s := fmt.Sprintf("%-15s %9.3f ms → %9.3f ms", label, b, a)
+	s := fmt.Sprintf("%-15s %9.3f ms -> %9.3f ms", label, b, a)
 	if b > 0 {
 		pct := (a - b) / b * 100
 		sign := "+"
@@ -149,11 +201,4 @@ func deltaMS(label string, before, after *float64) string {
 		s += fmt.Sprintf("   (%s%.1f%%)", sign, pct)
 	}
 	return s
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, one)
-	}
-	return fmt.Sprintf("%d %s", n, many)
 }

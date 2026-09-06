@@ -27,8 +27,8 @@ func TestDiffReportsScanMethodChange(t *testing.T) {
 	}
 	got := d.String()
 	for _, want := range []string{
-		"- SEQ_SCAN(drivers)",
-		"+ INDEX_SCAN(drivers drivers_nationality)",
+		"-SEQ_SCAN(drivers)",
+		"+INDEX_SCAN(drivers drivers_nationality)",
 		"execution time",
 		"-98.8%",
 	} {
@@ -91,10 +91,10 @@ func TestDiffReportsJoinMethodChange(t *testing.T) {
 		t.Fatal("expected a structural change")
 	}
 	got := d.String()
-	if !strings.Contains(got, "- HASH_JOIN(d)") {
+	if !strings.Contains(got, "-HASH_JOIN(d)") {
 		t.Errorf("missing removed HASH_JOIN:\n%s", got)
 	}
-	if !strings.Contains(got, "+ NESTED_LOOP_MATERIALIZE(d)") {
+	if !strings.Contains(got, "+NESTED_LOOP_MATERIALIZE(d)") {
 		t.Errorf("missing added NESTED_LOOP_MATERIALIZE:\n%s", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestDiffReportsParallelismLoss(t *testing.T) {
 `)
 	d := DiffPlans(before, after)
 	got := d.String()
-	if !strings.Contains(got, "- GATHER(results)") || !strings.Contains(got, "+ NO_GATHER(results)") {
+	if !strings.Contains(got, "-GATHER(results)") || !strings.Contains(got, "+NO_GATHER(results)") {
 		t.Errorf("parallelism change not reported:\n%s", got)
 	}
 }
@@ -121,8 +121,8 @@ func TestDiffOmitsNumbersWithoutAnalyze(t *testing.T) {
 	before := mustParse(t, " Seq Scan on drivers\n")
 	after := mustParse(t, " Seq Scan on drivers\n")
 	got := DiffPlans(before, after).String()
-	if strings.Contains(got, "NUMBERS") {
-		t.Errorf("expected no NUMBERS section without ANALYZE:\n%s", got)
+	if strings.Contains(got, "execution time") {
+		t.Errorf("expected no timing lines without ANALYZE:\n%s", got)
 	}
 }
 
@@ -133,4 +133,42 @@ func mustParse(t *testing.T, s string) *Plan {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// The output shape is now a contract, not an implementation detail: it is
+// what the book and courses typeset, and what a pager or review tool
+// colours. Pin it exactly, header and all.
+func TestDiffIsUnifiedDiffFormat(t *testing.T) {
+	before := mustParse(t, ` Seq Scan on drivers  (cost=0.00..30.40 rows=1 width=15) (actual time=0.010..18.245 rows=1 loops=1)
+ Planning Time: 0.301 ms
+ Execution Time: 18.245 ms
+`)
+	after := mustParse(t, ` Index Scan using geoname_name on drivers  (cost=0.28..8.30 rows=1 width=15) (actual time=0.020..0.049 rows=1 loops=1)
+ Planning Time: 0.306 ms
+ Execution Time: 0.049 ms
+`)
+	d := DiffPlans(before, after)
+	d.BeforeName = "4-4b-non-sargable-function"
+	d.AfterName = "4-4c-sargable-rewrite"
+
+	want := "--- 4-4b-non-sargable-function\n" +
+		"+++ 4-4c-sargable-rewrite\n" +
+		"@@ plan structure @@\n" +
+		"-SEQ_SCAN(drivers)\n" +
+		"+INDEX_SCAN(drivers geoname_name)\n" +
+		"\n" +
+		" execution time     18.245 ms ->     0.049 ms   (-99.7%)\n" +
+		" planning time       0.301 ms ->     0.306 ms   (+1.7%)\n"
+	if got := d.String(); got != want {
+		t.Fatalf("unified diff mismatch\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// Unnamed sides still produce a well-formed header rather than "--- ".
+func TestDiffHeaderFallsBackWhenUnnamed(t *testing.T) {
+	p := mustParse(t, " Seq Scan on drivers\n")
+	got := DiffPlans(p, p).String()
+	if !strings.HasPrefix(got, "--- before\n+++ after\n") {
+		t.Fatalf("expected fallback header, got:\n%s", got)
+	}
 }

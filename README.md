@@ -83,19 +83,29 @@ by tag rather than by position:
 
 ```console
 $ sqlfmt explain diff before.txt after.txt
-STRUCTURE (2 changes)
-  - SEQ_SCAN(geoname)
-  + INDEX_SCAN(geoname geoname_name)
+--- before.txt
++++ after.txt
+@@ plan structure @@
+-SEQ_SCAN(geoname)
++INDEX_SCAN(geoname geoname_name)
 
-NUMBERS
-  execution time     18.245 ms →     0.049 ms   (-99.7%)
-  planning time       0.301 ms →     0.306 ms   (+1.7%)
+ execution time     18.245 ms ->     0.049 ms   (-99.7%)
+ planning time       0.301 ms ->     0.306 ms   (+1.7%)
 ```
 
-Numbers are reported, but separately and always labelled as such; they are
-never mixed into the structural comparison. `explain diff` exits 0 when the
-two plans are structurally identical and 1 when they are not, so it
-composes into scripts and CI.
+The output is unified diff, which is the interoperability: every pager,
+editor, review tool and syntax highlighter already colours `-` and `+`
+lines, so this drops into `less -R`, `delta`, `bat`, a GitHub comment or a
+typeset listing and comes out right with nothing being taught how.
+
+```console
+$ sqlfmt explain diff before.txt after.txt | delta
+```
+
+The timing lines are ordinary context lines, deliberately: they are
+reported alongside the structural comparison and must never be mistaken
+for part of it. `explain diff` exits 0 when the two plans are structurally
+identical and 1 when they are not, so it composes into scripts and CI.
 
 Plans are read in psql's default TEXT format — with or without `ANALYZE`,
 with or without costs (`COSTS OFF` included), with or without the
