@@ -127,6 +127,10 @@ func runExplainDiff(args []string) int {
 	}
 
 	d := explain.DiffPlans(before, after)
+	// Name the two sides after the files, the way diff(1) does: a diff
+	// that does not say what it compared makes the reader remember.
+	d.BeforeName = fs.Arg(0)
+	d.AfterName = fs.Arg(1)
 	fmt.Print(d.String())
 	if d.SameStructure() {
 		return 0
