@@ -1,0 +1,147 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/dimitri/sqlfmt/explain"
+)
+
+// The "explain" subcommand namespace works on EXPLAIN *output* — the plan
+// text a server printed — as opposed to the top-level command, which
+// formats EXPLAIN *statements* along with the rest of your SQL.
+//
+// Why a subcommand here when the formatter itself is flags-and-paths,
+// gofmt-style, and stays that way:
+//
+//   - The existing CLI is a published contract. "sqlfmt file.sql" formats,
+//     and it has to keep formatting. Only a first argument of literally
+//     "explain" diverts into this namespace; everything else takes the
+//     original path unchanged.
+//   - Plan work does not fit the formatter's shape. "sqlfmt [flags]
+//     [path...]" means "do this to each of these files independently",
+//     which is exactly wrong for a diff: two plans are one operation on a
+//     PAIR, not two operations. Expressing that as flags (-diff a.txt
+//     b.txt, positionally significant) would be worse than a subcommand.
+//   - It leaves room. "explain diff" and "explain advice" are the two
+//     that exist; the namespace can grow without adding more top-level
+//     flags to a formatter.
+//
+// A file genuinely named "explain" is the one ambiguity, and "./explain"
+// resolves it.
+func runExplain(args []string) int {
+	if len(args) == 0 {
+		explainUsage()
+		return 2
+	}
+	switch args[0] {
+	case "advice":
+		return runExplainAdvice(args[1:])
+	case "diff":
+		return runExplainDiff(args[1:])
+	case "help", "-h", "--help":
+		explainUsage()
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "sqlfmt explain: unknown subcommand %q\n\n", args[0])
+		explainUsage()
+		return 2
+	}
+}
+
+func explainUsage() {
+	fmt.Fprint(os.Stderr, `usage: sqlfmt explain <command> [args]
+
+Work on EXPLAIN output — the plan text a server printed.
+
+commands:
+  advice [plan]           print the plan's structure as PostgreSQL 19
+                          plan advice; reads stdin when no file is given
+  diff <before> <after>   compare two plans: what the planner decided
+                          differently, and how the timings moved
+
+Plans are read in psql's default TEXT format, with or without ANALYZE,
+costs, the QUERY PLAN header, or a trailing row count.
+`)
+}
+
+func runExplainAdvice(args []string) int {
+	fs := flag.NewFlagSet("sqlfmt explain advice", flag.ExitOnError)
+	fs.Parse(args)
+
+	var src []byte
+	var name string
+	var err error
+	switch fs.NArg() {
+	case 0:
+		name = "<standard input>"
+		src, err = io.ReadAll(os.Stdin)
+	case 1:
+		name = fs.Arg(0)
+		src, err = os.ReadFile(name)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: sqlfmt explain advice [plan]")
+		return 2
+	}
+	if err != nil {
+		report(err)
+		return 2
+	}
+
+	plan, err := explain.Parse(string(src))
+	if err != nil {
+		report(fmt.Errorf("%s: %w", name, err))
+		return 2
+	}
+	out := explain.AdviceString(plan)
+	if out == "" {
+		report(fmt.Errorf("%s: no plan advice could be derived", name))
+		return 2
+	}
+	fmt.Println(out)
+	return 0
+}
+
+// runExplainDiff exits 0 when the two plans are structurally identical and
+// 1 when they are not, so it composes into scripts and CI the way diff(1)
+// does. A real error is 2.
+func runExplainDiff(args []string) int {
+	fs := flag.NewFlagSet("sqlfmt explain diff", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() != 2 {
+		fmt.Fprintln(os.Stderr, "usage: sqlfmt explain diff <before> <after>")
+		return 2
+	}
+	before, err := parsePlanFile(fs.Arg(0))
+	if err != nil {
+		report(err)
+		return 2
+	}
+	after, err := parsePlanFile(fs.Arg(1))
+	if err != nil {
+		report(err)
+		return 2
+	}
+
+	d := explain.DiffPlans(before, after)
+	fmt.Print(d.String())
+	if d.SameStructure() {
+		return 0
+	}
+	return 1
+}
+
+func parsePlanFile(path string) (*explain.Plan, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := explain.Parse(string(src))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return plan, nil
+}

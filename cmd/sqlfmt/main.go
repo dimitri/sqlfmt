@@ -28,8 +28,16 @@ var (
 )
 
 func main() {
+	// The "explain" subcommand namespace is checked before flag parsing so
+	// its own flags never collide with the formatter's. Everything else
+	// takes the original gofmt-style path, unchanged.
+	if len(os.Args) > 1 && os.Args[1] == "explain" {
+		os.Exit(runExplain(os.Args[2:]))
+	}
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: sqlfmt [flags] [path ...]\n")
+		fmt.Fprintf(os.Stderr, "       sqlfmt explain <command> [args]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()

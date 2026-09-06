@@ -47,6 +47,69 @@ $ cat query.sql | sqlfmt        # stdin -> stdout, pipeable
 $ sqlfmt -V                     # print the version and exit
 ```
 
+### Working on EXPLAIN output
+
+The top-level command formats SQL, including `EXPLAIN` *statements*. The
+`explain` subcommand works on EXPLAIN *output* — the plan text a server
+printed:
+
+```console
+$ sqlfmt explain advice plan.txt          # the plan's structure, as plan advice
+$ sqlfmt explain diff before.txt after.txt # what changed between two plans
+```
+
+`explain advice` prints a description of the plan's *structure* in the
+format PostgreSQL 19's `pg_plan_advice` generates:
+
+```console
+$ sqlfmt explain advice plan.txt
+JOIN_ORDER(f d)
+MERGE_JOIN_PLAIN(d)
+INDEX_SCAN(f join_fact_dim_id d join_dim_pkey)
+NO_GATHER(f d)
+```
+
+The useful property is what the format leaves out. There is no cost in it,
+no row estimate, no timing — only the decisions the planner made: join
+order, join method, access method, parallelism. That makes it the one
+rendering of a plan that is stable across runs.
+
+Which is what `explain diff` is built on. A plain `diff` of two EXPLAIN
+outputs is useless, because every line carries a cost or a timing so every
+line differs, and the one change that explains the difference is buried in
+noise. Comparing the advice instead sidesteps that — and sidesteps having
+to align nodes between two differently-shaped trees, since advice is keyed
+by tag rather than by position:
+
+```console
+$ sqlfmt explain diff before.txt after.txt
+STRUCTURE (2 changes)
+  - SEQ_SCAN(geoname)
+  + INDEX_SCAN(geoname geoname_name)
+
+NUMBERS
+  execution time     18.245 ms →     0.049 ms   (-99.7%)
+  planning time       0.301 ms →     0.306 ms   (+1.7%)
+```
+
+Numbers are reported, but separately and always labelled as such; they are
+never mixed into the structural comparison. `explain diff` exits 0 when the
+two plans are structurally identical and 1 when they are not, so it
+composes into scripts and CI.
+
+Plans are read in psql's default TEXT format — with or without `ANALYZE`,
+with or without costs (`COSTS OFF` included), with or without the
+`QUERY PLAN` header, box-drawing borders, leading statement echoes or a
+trailing `(N rows)`. TEXT rather than `FORMAT JSON` because pasted text is
+what people actually have.
+
+PostgreSQL 19 computes advice inside the planner; `sqlfmt` reconstructs it
+from plan text, so it works on the version you are running. The known
+differences from real generated advice are listed in `explain/advice.go`
+and worth reading before relying on it — chiefly that index names are not
+schema-qualified, and that this is a **comparison key, not a
+round-trippable advice string**.
+
 As a library: `import "github.com/dimitri/sqlfmt/format"` (module path TBD —
 not yet published), `format.Format(io.Reader) (string, error)`, so callers
 like `app.taop.xyz`'s `cmd/sqlbuild` book-build tool can format embedded
@@ -210,7 +273,17 @@ format/                    — package format, the library (import "github.com/d
   comments.go              — comment attachment, reflow, and C-style block rewrap (rule 18)
   format.go                — the library entry point (Format)
   format_test.go           — corpus round-trip test (reads ../testdata/corpus)
-cmd/sqlfmt/main.go         — the CLI binary
+explain/                   — package explain, EXPLAIN *output* (not the EXPLAIN
+                             statement, which format/ handles) — import
+                             "github.com/dimitri/sqlfmt/explain"
+  parse.go                 — psql TEXT-format plan text -> Node/Plan tree
+  nodetype.go              — node-type vocabulary and classification
+  format.go                — FormatForWidth, reflow for fixed-width media
+  advice.go                — Advice: plan structure in PostgreSQL 19's
+                             pg_plan_advice format, derived on any version
+  diff.go                  — DiffPlans: structural comparison of two plans
+cmd/sqlfmt/main.go         — the CLI binary (formatter; gofmt-style flags)
+cmd/sqlfmt/explaincmd.go   — the "explain" subcommand namespace
 wasm/main.go                — WebAssembly build (globalThis.sqlfmt.format), see "WebAssembly build"
 wasm/smoketest.mjs          — Node smoke test for the built wasm module
 wasm/compress.mjs           — produces sqlfmt.wasm.gz from the built module
