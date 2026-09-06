@@ -35,6 +35,17 @@ var nodeTypeTokens = []struct {
 	{"Index Scan", "index-scan"},
 	{"Bitmap Heap Scan", "bitmap-heap-scan"},
 	{"Bitmap Index Scan", "bitmap-index-scan"},
+	// The two bitmap-combining nodes, which PostgreSQL spells
+	// run-together. They are not scans: they consume the bitmaps their
+	// Bitmap Index Scan children produce and hand one combined bitmap up
+	// to the Bitmap Heap Scan. Missing here, they fell through to
+	// "unknown" and were displayed as a generic "Node", which is exactly
+	// the name a reader is trying to look up when an OR predicate does or
+	// does not use its indexes.
+	{"BitmapAnd", "bitmap-and"},
+	{"Bitmap And", "bitmap-and"},
+	{"BitmapOr", "bitmap-or"},
+	{"Bitmap Or", "bitmap-or"},
 	{"Tid Range Scan", "tid-range-scan"},
 	{"Tid Scan", "tid-scan"},
 	{"Sample Scan", "sample-scan"},
@@ -94,6 +105,7 @@ var nodeTypeTokens = []struct {
 var typeLabelMap = map[string]string{
 	"index-only-scan": "Index Only Scan", "index-scan": "Index Scan",
 	"bitmap-heap-scan": "Bitmap Heap Scan", "bitmap-index-scan": "Bitmap Index Scan",
+	"bitmap-and": "BitmapAnd", "bitmap-or": "BitmapOr",
 	"tid-range-scan": "Tid Range Scan", "tid-scan": "Tid Scan",
 	"sample-scan": "Sample Scan", "function-scan": "Function Scan",
 	"table-function-scan": "Table Function Scan", "values-scan": "Values Scan",
