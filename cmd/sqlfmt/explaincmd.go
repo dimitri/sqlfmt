@@ -41,6 +41,8 @@ func runExplain(args []string) int {
 		return runExplainAdvice(args[1:])
 	case "diff":
 		return runExplainDiff(args[1:])
+	case "canonical":
+		return runExplainCanonical(args[1:])
 	case "help", "-h", "--help":
 		explainUsage()
 		return 0
@@ -62,6 +64,17 @@ commands:
   diff <before> <after>   compare two plans: what the planner decided
                           differently, and how the timings moved
 
+  canonical [advice]      read an advice block that a server already
+                          printed and normalize it the same way
+
+Both advice and diff take -canonical, which normalizes advice before it is printed or
+compared: set-valued targets are sorted and schema qualifiers dropped.
+Use it when the two plans did not come from the same source — comparing
+one of these reconstructions against PostgreSQL 19's own PLAN_ADVICE
+output, say, where the two agree on the decisions but not on how they
+write them down. Canonical output is a comparison key, not advice you can
+feed back to a server.
+
 Plans are read in psql's default TEXT format, with or without ANALYZE,
 costs, the QUERY PLAN header, or a trailing row count.
 `)
@@ -69,6 +82,8 @@ costs, the QUERY PLAN header, or a trailing row count.
 
 func runExplainAdvice(args []string) int {
 	fs := flag.NewFlagSet("sqlfmt explain advice", flag.ExitOnError)
+	canonical := fs.Bool("canonical", false,
+		"normalize for comparison: sort set-valued targets, strip schema qualifiers")
 	fs.Parse(args)
 
 	var src []byte
@@ -96,6 +111,9 @@ func runExplainAdvice(args []string) int {
 		return 2
 	}
 	out := explain.AdviceString(plan)
+	if *canonical {
+		out = explain.CanonicalAdviceString(plan)
+	}
 	if out == "" {
 		report(fmt.Errorf("%s: no plan advice could be derived", name))
 		return 2
@@ -109,6 +127,9 @@ func runExplainAdvice(args []string) int {
 // does. A real error is 2.
 func runExplainDiff(args []string) int {
 	fs := flag.NewFlagSet("sqlfmt explain diff", flag.ExitOnError)
+	canonical := fs.Bool("canonical", false,
+		"normalize both sides before comparing; use when the two plans did "+
+			"not come from the same source")
 	fs.Parse(args)
 
 	if fs.NArg() != 2 {
@@ -127,6 +148,9 @@ func runExplainDiff(args []string) int {
 	}
 
 	d := explain.DiffPlans(before, after)
+	if *canonical {
+		d = explain.DiffPlansCanonical(before, after)
+	}
 	// Name the two sides after the files, the way diff(1) does: a diff
 	// that does not say what it compared makes the reader remember.
 	d.BeforeName = fs.Arg(0)
@@ -148,4 +172,49 @@ func parsePlanFile(path string) (*explain.Plan, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return plan, nil
+}
+
+// runExplainCanonical normalizes advice that already exists, rather than
+// deriving it from a plan.
+//
+// This is the other half of cross-source comparison. "explain advice
+// -canonical" canonicalizes what this package reconstructs; this
+// canonicalizes what PostgreSQL 19 itself printed, so the two can be put
+// side by side:
+//
+//	diff <(sqlfmt explain advice -canonical pg16-plan.txt) \
+//	     <(sqlfmt explain canonical pg19-plan.txt)
+//
+// Input may be a whole EXPLAIN (PLAN_ADVICE) capture — the advice block is
+// found inside it — or just the advice lines.
+func runExplainCanonical(args []string) int {
+	fs := flag.NewFlagSet("sqlfmt explain canonical", flag.ExitOnError)
+	fs.Parse(args)
+
+	var src []byte
+	var name string
+	var err error
+	switch fs.NArg() {
+	case 0:
+		name = "<standard input>"
+		src, err = io.ReadAll(os.Stdin)
+	case 1:
+		name = fs.Arg(0)
+		src, err = os.ReadFile(name)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: sqlfmt explain canonical [advice]")
+		return 2
+	}
+	if err != nil {
+		report(err)
+		return 2
+	}
+
+	out := explain.CanonicalAdviceTextFrom(string(src))
+	if out == "" {
+		report(fmt.Errorf("%s: no advice lines found", name))
+		return 2
+	}
+	fmt.Println(out)
+	return 0
 }
