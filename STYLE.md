@@ -178,7 +178,47 @@ fixture's current content.
     computation at that new base indent. Closing `)` goes on its own line,
     indented to approximate the *opening construct's* own indent — this is
     visibly hand-tuned per instance in the source and not perfectly
-    reproducible mechanically:
+    reproducible mechanically.
+
+    "Wherever it opens" is **not** always the paren. Where the paren ends a
+    keyword phrase — `where exists (`, `where not exists (`, `where x in (`,
+    `= any(` — the phrase is the construct's real left edge. The paren
+    moves to a line of its own at *that* column, the body is indented
+    inside it, and the closing `)` returns to it, so the three lines
+    bracket the subquery:
+
+    ```sql
+     where exists
+           (
+             select 1
+               from results res
+               join races r on r.raceid = res.raceid
+              where res.driverid = d.driverid
+           )
+    ```
+
+    Leaving the paren at the end of `where exists (` reads as though the
+    subquery were part of the predicate rather than its whole right-hand
+    side, and leaves the body hanging off a column the eye has no reason
+    to expect. Hanging the body off the paren *itself* is worse again: it
+    indents the subquery by the full width of whatever predicate happened
+    to precede it, for no gain.
+
+    Where the paren itself opens the construct — a scalar subquery in a
+    select list, a derived table in `FROM` — the body is indented *inside*
+    the paren (2 columns) and the closing `)` returns to the paren's own
+    column:
+
+    ```sql
+      select ds.driverid,
+             (
+               select count(*) + 1
+                 from driverstandings inner_ds
+                where inner_ds.raceid = ds.raceid
+             ) as rank
+    ```
+
+    A subquery whose body fits on one line stays inline, parens and all.
     ```sql
     select *
       from get_all_albums(
