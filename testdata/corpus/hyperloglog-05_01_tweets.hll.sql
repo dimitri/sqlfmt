@@ -3,11 +3,12 @@ begin;
 with new_visitors as (
      delete
        from tweet.visitor
-      where id = any(
-                   select id
-                     from tweet.visitor
-                 order by datetime, messageid for update skip locked
-                    limit 1000
+      where id = any
+                 (
+                     select id
+                       from tweet.visitor
+                   order by datetime, messageid for update skip locked
+                      limit 1000
                  )
   returning messageid,
             cast (datetime as date) as date,

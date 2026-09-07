@@ -17,49 +17,59 @@ func leftCol(out, want string) int {
 	return -1
 }
 
-// A subquery after EXISTS aligns its body under the EXISTS, not under the
-// paren -- the paren sits at the end of the predicate, so hanging the body
-// off it indents the subquery by the width of whatever preceded it.
+// A subquery after EXISTS gets its own bracket: the paren moves to a line
+// of its own at the EXISTS column, the body is indented inside it, and the
+// closing paren returns to that column.
 //
-// The regression this pins is worse than a wrong indent: the body's own
-// clause keywords were river-aligned at one base while its first line was
-// emitted at another, so SELECT sat two columns right of the FROM and
+// Leaving the paren at the end of "where exists (" reads as though the
+// subquery were part of the predicate rather than its whole right-hand
+// side, and leaves the body hanging off a column the eye has no reason to
+// expect. The three lines together make the extent of the subquery
+// visible without reading it.
+//
+// The regression underneath this is worse than a wrong indent: the body's
+// own clause keywords were river-aligned at one base while its first line
+// was emitted at another, so SELECT sat two columns right of the FROM and
 // WHERE that were supposed to align with it.
-func TestSubqueryAfterExistsAlignsUnderKeyword(t *testing.T) {
+func TestSubqueryAfterExistsBracketsUnderKeyword(t *testing.T) {
 	out := fmtOne(t, `select d.surname from f1db.drivers d
 where exists (select 1 from f1db.results res
 join f1db.races r on r.raceid = res.raceid
 where res.driverid = d.driverid and r.year = 2017 and res.positionorder = 1)
 order by d.surname;`)
 
-	exists := leftCol(out, "where exists (") + len("where ")
-	if exists < 0 {
+	exists := leftCol(out, "where exists") + len("where ")
+	if exists < len("where ") {
 		t.Fatalf("no exists line:\n%s", out)
 	}
-	for _, kw := range []string{"select 1", "from f1db.results"} {
-		if c := leftCol(out, kw); c < 0 {
-			t.Fatalf("missing %q:\n%s", kw, out)
-		}
+	if !strings.Contains(out, "\n"+strings.Repeat(" ", exists)+"(\n") {
+		t.Errorf("open paren not alone on the EXISTS column %d:\n%s", exists, out)
+	}
+	if !strings.Contains(out, "\n"+strings.Repeat(" ", exists)+")\n") {
+		t.Errorf("close paren not alone on the EXISTS column %d:\n%s", exists, out)
 	}
 	// select is the longest keyword at that level, so it is the river's
-	// left edge and lands exactly on the EXISTS column.
-	if c := leftCol(out, "select 1"); c != exists {
-		t.Errorf("subquery river at %d, want %d (the EXISTS column):\n%s", c, exists, out)
+	// left edge: two columns inside the paren.
+	if c := leftCol(out, "select 1"); c != exists+2 {
+		t.Errorf("subquery river at %d, want %d (inside the paren):\n%s", c, exists+2, out)
 	}
 	// FROM is one shorter than SELECT, so it sits two columns right of it.
-	if c := leftCol(out, "from f1db.results"); c != exists+2 {
-		t.Errorf("subquery FROM at %d, want %d:\n%s", c, exists+2, out)
+	if c := leftCol(out, "from f1db.results"); c != exists+4 {
+		t.Errorf("subquery FROM at %d, want %d:\n%s", c, exists+4, out)
 	}
 }
 
-// NOT EXISTS aligns to the "not", not to the "exists".
-func TestSubqueryAfterNotExistsAlignsUnderNot(t *testing.T) {
+// NOT EXISTS brackets under the "not", not under the "exists".
+func TestSubqueryAfterNotExistsBracketsUnderNot(t *testing.T) {
 	out := fmtOne(t, `select a from t
 where not exists (select 1 from u where u.id = t.id and u.x = 1
 and u.y = 2 and u.zzzzzzzzzzzz = 3 and u.wwwwwwwwww = 4);`)
-	not := leftCol(out, "where not exists (") + len("where ")
-	if c := leftCol(out, "select 1"); c != not {
-		t.Errorf("subquery river at %d, want %d (the NOT column):\n%s", c, not, out)
+	not := leftCol(out, "where not exists") + len("where ")
+	if !strings.Contains(out, "\n"+strings.Repeat(" ", not)+"(\n") {
+		t.Errorf("open paren not alone on the NOT column %d:\n%s", not, out)
+	}
+	if c := leftCol(out, "select 1"); c != not+2 {
+		t.Errorf("subquery river at %d, want %d:\n%s", c, not+2, out)
 	}
 }
 
@@ -123,21 +133,26 @@ select a from c;`)
 
 // "any(" takes no space before its paren (rule 4), so the operator's
 // column is one nearer the paren than a spaced introducer's would be.
-func TestAnySubqueryAlignsUnderOperator(t *testing.T) {
+func TestAnySubqueryBracketsUnderOperator(t *testing.T) {
 	out := fmtOne(t, `select a from t where t.id = any (select u.id from u
 where u.x = 1 and u.yyyyy = 22 and u.zzzzzzzz = 3 and u.wwwwwwwwww = 4);`)
-	line := ""
+	// "any" takes no space before its paren (rule 4), so the operator's
+	// column has to be found on the line rather than assumed one space
+	// left of the paren -- the off-by-one this pins.
+	col := -1
 	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, "any(") {
-			line = l
+		if i := strings.Index(l, "= any"); i >= 0 {
+			col = i + len("= ")
 		}
 	}
-	if line == "" {
-		t.Fatalf("no any( line:\n%s", out)
+	if col < 0 {
+		t.Fatalf("no ANY line:\n%s", out)
 	}
-	want := strings.Index(line, "any(")
-	if c := leftCol(out, "select u.id"); c != want {
-		t.Errorf("subquery river at %d, want %d (the ANY column):\n%s", c, want, out)
+	if !strings.Contains(out, "\n"+strings.Repeat(" ", col)+"(\n") {
+		t.Errorf("open paren not alone on the ANY column %d:\n%s", col, out)
+	}
+	if c := leftCol(out, "select u.id"); c != col+2 {
+		t.Errorf("subquery river at %d, want %d:\n%s", c, col+2, out)
 	}
 }
 

@@ -29,10 +29,11 @@ ins as (
               wiki_qid,
               ulan
          from batch
-        where not exists (
-              select 1
-                from moma.artist
-               where artist.constituentid = batch.constituentid
+        where not exists
+              (
+                select 1
+                  from moma.artist
+                 where artist.constituentid = batch.constituentid
               )
   on conflict (constituentid) do nothing
     returning artist.constituentid

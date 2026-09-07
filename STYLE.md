@@ -182,20 +182,27 @@ fixture's current content.
 
     "Wherever it opens" is **not** always the paren. Where the paren ends a
     keyword phrase — `where exists (`, `where not exists (`, `where x in (`,
-    `= any(`, `left join lateral (` — the phrase is the construct's real
-    left edge, and the body's river aligns to *its* start column, with the
-    closing `)` on that column too. Hanging the body off the paren instead
-    indents it by the full width of whatever predicate or join phrase
-    happened to precede it, for no gain:
+    `= any(` — the phrase is the construct's real left edge. The paren
+    moves to a line of its own at *that* column, the body is indented
+    inside it, and the closing `)` returns to it, so the three lines
+    bracket the subquery:
 
     ```sql
-     where exists (
-           select 1
-             from results res
-             join races r on r.raceid = res.raceid
-            where res.driverid = d.driverid
+     where exists
+           (
+             select 1
+               from results res
+               join races r on r.raceid = res.raceid
+              where res.driverid = d.driverid
            )
     ```
+
+    Leaving the paren at the end of `where exists (` reads as though the
+    subquery were part of the predicate rather than its whole right-hand
+    side, and leaves the body hanging off a column the eye has no reason
+    to expect. Hanging the body off the paren *itself* is worse again: it
+    indents the subquery by the full width of whatever predicate happened
+    to precede it, for no gain.
 
     Where the paren itself opens the construct — a scalar subquery in a
     select list, a derived table in `FROM` — the body is indented *inside*

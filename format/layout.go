@@ -990,20 +990,40 @@ func renderRun(toks []Token, col int) []string {
 				// The space, if any, has already been written above, so
 				// curCol is exactly where "(" lands.
 				openCol := curCol
-				bodyIndent, closeIndent := subqueryIndents(toks, i, openCol, needSpace)
-				content := formatQuerySegment(inner, bodyIndent)
+				introCol, hasIntro := introducerCol(toks, i, openCol, needSpace)
+				// After an introducing operator the paren moves to a line
+				// of its own, at the OPERATOR's column; otherwise it stays
+				// where it already is. Either way the body is indented
+				// inside the paren and the closing paren returns to the
+				// paren's own column, so a subquery always reads as one
+				// bracketed block with its own margin.
+				parenCol := openCol
+				if hasIntro {
+					parenCol = introCol
+				}
+				content := formatQuerySegment(inner, parenCol+2)
 				if len(content) > 1 {
-					// STYLE.md rule 12: the body is indented under the
-					// construct that opens it, and the closing paren is
-					// indented to that construct's own column. content
-					// already carries bodyIndent -- appending the lines
-					// as they are is what keeps the body's first clause
-					// keyword on the same river as the rest of its
+					if hasIntro {
+						// "where exists (" put the paren at the end of a
+						// long predicate line, which reads as though the
+						// subquery belonged to the predicate rather than
+						// being its whole right-hand side -- and left the
+						// body hanging off a column the eye has no reason
+						// to expect. On its own line under the operator,
+						// the open paren, the body and the close paren
+						// form a visible bracket.
+						lines[len(lines)-1] = strings.TrimRight(lines[len(lines)-1], " ")
+						lines = append(lines, strings.Repeat(" ", parenCol)+"(")
+					} else {
+						write("(")
+					}
+					// content already carries its indent -- appending the
+					// lines as they are is what keeps the body's first
+					// clause keyword on the same river as the rest of its
 					// clauses.
-					write("(")
 					lines = append(lines, content...)
-					lines = append(lines, strings.Repeat(" ", closeIndent)+")")
-					curCol = closeIndent + 1
+					lines = append(lines, strings.Repeat(" ", parenCol)+")")
+					curCol = parenCol + 1
 				} else {
 					// Content fits on one line: keep the closing paren
 					// glued to it too, rather than forcing an extra line.
@@ -2147,34 +2167,6 @@ var subqueryIntroducers = map[string]bool{
 	// pushes it a dozen columns right of anything it relates to and
 	// starts wrapping expressions that fitted before.
 	"lateral": true,
-}
-
-// subqueryIndents returns the column the subquery body's river should
-// start at, and the column its closing paren should sit at, for the "("
-// at toks[open] landing at column openCol.
-//
-// Two shapes, per STYLE.md rule 12's "indent the subquery body under
-// wherever it opens":
-//
-//   - after an introducing operator, the body aligns under the OPERATOR
-//     and the closing paren with it:
-//
-//     where exists (
-//     select 1
-//     from results res
-//     ...
-//     )
-//
-//     (the body's leftmost keyword lines up under "exists")
-//
-//   - otherwise the paren itself opens the construct -- a scalar
-//     subquery in a select list, a derived table in FROM -- so the body
-//     is indented inside it and the closing paren returns to its column.
-func subqueryIndents(toks []Token, open, openCol int, spaced bool) (body, close int) {
-	if introCol, ok := introducerCol(toks, open, openCol, spaced); ok {
-		return introCol, introCol
-	}
-	return openCol + 2, openCol
 }
 
 // introducerCol finds the start column of the operator phrase immediately
