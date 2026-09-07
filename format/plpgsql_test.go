@@ -71,7 +71,19 @@ $$;`
 	if !strings.Contains(got, "perform (") {
 		t.Errorf("PERFORM keyword lost:\n%s", got)
 	}
-	if !strings.Contains(got, "\n           select ") && !strings.Contains(got, "\n     select ") {
+	// Indented more deeply than PERFORM itself, on its own line -- the
+	// point is that the argument got the query layout, not that it landed
+	// on one particular column. Pinning the column made this test fail
+	// for a change that moved the subquery river to where STYLE.md rule
+	// 12 actually asks for it.
+	formatted := false
+	for _, l := range strings.Split(got, "\n") {
+		if t := strings.TrimLeft(l, " "); strings.HasPrefix(t, "select ") &&
+			len(l)-len(t) > len("  perform") {
+			formatted = true
+		}
+	}
+	if !formatted {
 		t.Errorf("embedded query not formatted:\n%s", got)
 	}
 	for _, l := range strings.Split(got, "\n") {

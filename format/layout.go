@@ -316,13 +316,56 @@ func isJoinModifier(lower string) bool {
 // output with spaces -- so a LATERAL subquery, which renderRun lays out
 // across several lines, was folded back onto the JOIN line and ran to
 // hundreds of columns. Always returns at least one line.
-func joinTableLines(toks []Token, col int) []string {
+// joinTableLines renders the relation a JOIN joins to, starting at column
+// col. phraseCol is the column the join keyword phrase itself starts at.
+//
+// A derived table -- "left join lateral (select ...)" -- aligns its body
+// to the JOIN PHRASE, not to the paren: by the time the paren is reached
+// the phrase has already consumed a dozen columns, and hanging the
+// subquery off it indents the whole derived table further right than
+// anything it relates to, wrapping expressions that fitted before. This
+// has to be decided here rather than in renderRun's own subquery branch,
+// because layoutFrom strips the join keywords into the phrase before
+// calling this -- so renderRun never sees the "lateral" that would have
+// told it where the construct really starts.
+func joinTableLines(toks []Token, col, phraseCol int) []string {
 	toks = trimTokens(toks)
+	if lines, ok := subqueryRelationLines(toks, phraseCol); ok {
+		return lines
+	}
 	lines := renderRun(toks, col)
 	if len(lines) == 0 {
 		return []string{""}
 	}
 	return lines
+}
+
+// subqueryRelationLines lays out "(select ...) alias" as a derived table
+// whose body is indented under baseCol and whose closing paren returns to
+// it. Declines anything that is not a parenthesized query, and anything
+// whose body fits on one line (which renderRun already keeps inline).
+func subqueryRelationLines(toks []Token, baseCol int) ([]string, bool) {
+	if len(toks) == 0 || toks[0].Text != "(" {
+		return nil, false
+	}
+	close := matchParen(toks, 0)
+	if close <= 0 {
+		return nil, false
+	}
+	inner := trimTokens(toks[1:close])
+	if !isQueryStart(inner) {
+		return nil, false
+	}
+	body := formatQuerySegment(inner, baseCol+2)
+	if len(body) < 2 {
+		return nil, false
+	}
+	lines := append([]string{"("}, body...)
+	tail := strings.Repeat(" ", baseCol) + ")"
+	if rest := trimTokens(toks[close+1:]); len(rest) > 0 {
+		tail += " " + plainJoin(rest)
+	}
+	return append(lines, tail), true
 }
 
 // longestAt returns the widest line of a rendered body whose first line
@@ -937,30 +980,35 @@ func renderRun(toks []Token, col int) []string {
 				write(" ")
 			}
 			if isSubquery {
-				content := formatQuerySegment(inner, curCol)
+				// openCol is where the "(" itself will land, which is the
+				// current column plus the space (if any) about to precede
+				// it. The old code asked leadingSpaces() for this, but
+				// renderRun's line 0 is a continuation of the CALLER's
+				// line and so carries no indent of its own -- so every
+				// subquery opened on a first line was laid out as though
+				// it sat at column 0.
+				// The space, if any, has already been written above, so
+				// curCol is exactly where "(" lands.
+				openCol := curCol
+				bodyIndent, closeIndent := subqueryIndents(toks, i, openCol, needSpace)
+				content := formatQuerySegment(inner, bodyIndent)
 				if len(content) > 1 {
-					// A multi-line subquery deep inside an expression would
-					// otherwise hang off whatever column its enclosing
-					// paren happened to reach; break it onto its own,
-					// boundedly-indented lines instead (STYLE.md rule 12,
-					// explicitly best-effort).
-					breakIndent := leadingSpaces(lines[len(lines)-1]) + 2
-					content = formatQuerySegment(inner, breakIndent)
+					// STYLE.md rule 12: the body is indented under the
+					// construct that opens it, and the closing paren is
+					// indented to that construct's own column. content
+					// already carries bodyIndent -- appending the lines
+					// as they are is what keeps the body's first clause
+					// keyword on the same river as the rest of its
+					// clauses.
 					write("(")
-					lines = append(lines, strings.Repeat(" ", breakIndent))
-					curCol = breakIndent
-					merge(content)
-					closeIndent := breakIndent - 2
-					if closeIndent < 0 {
-						closeIndent = 0
-					}
+					lines = append(lines, content...)
 					lines = append(lines, strings.Repeat(" ", closeIndent)+")")
 					curCol = closeIndent + 1
 				} else {
 					// Content fits on one line: keep the closing paren
 					// glued to it too, rather than forcing an extra line.
 					write("(")
-					merge(content)
+					write(strings.TrimLeft(content[0], " "))
 					write(")")
 				}
 			} else {
@@ -1657,14 +1705,27 @@ func formatQuerySegment(toks []Token, baseIndent int) []string {
 		}
 	}
 
+	// Every return below carries baseIndent, including the one-line ones.
+	// They used not to, which made this function's contract depend on how
+	// its result happened to come out: callers that add the indent
+	// themselves were correct for a body that fitted on one line and
+	// double-indented one that wrapped, and callers that don't were the
+	// other way round. Both kinds existed. renderRun's subquery branch
+	// then compounded it by deriving its indent from the leading spaces of
+	// a line that is often a continuation of the caller's, i.e. not
+	// indented at all -- which is why a wrapped subquery came out with its
+	// first clause keyword two columns right of the river its own FROM and
+	// WHERE were aligned to.
+	pad := strings.Repeat(" ", baseIndent)
+
 	segs := splitClauses(toks)
 	if segs == nil {
-		return []string{flatJoin(toks)}
+		return []string{pad + flatJoin(toks)}
 	}
 	width := riverWidth(segs)
 
 	if fitsInline(segs, baseIndent, width) && !anyTokenComments(toks) {
-		return []string{flatJoin(toks)}
+		return []string{pad + flatJoin(toks)}
 	}
 
 	var lines []string
@@ -1858,7 +1919,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		}
 		if onIdx == -1 {
 			head := strings.Repeat(" ", phrasePad) + phrase + " "
-			tl := joinTableLines(rest, len(head))
+			tl := joinTableLines(rest, len(head), phrasePad)
 			tl[len(tl)-1] += segTrailing
 			out = append(out, head+tl[0])
 			out = append(out, tl[1:]...)
@@ -1868,7 +1929,7 @@ func layoutFrom(toks []Token, baseIndent, width int) []string {
 		condPart := trimTokens(rest[onIdx+1:])
 		preds, ops := splitAndOr(condPart)
 		head := strings.Repeat(" ", phrasePad) + phrase + " "
-		tl := joinTableLines(tablePart, len(head))
+		tl := joinTableLines(tablePart, len(head), phrasePad)
 		if len(preds) == 1 {
 			// Single-condition ON stays inline after the join keyword
 			// phrase -- unless the table part is a subquery that wrapped,
@@ -2051,13 +2112,15 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 	}
 	close := matchParen(cte, open)
 	inner := cte[open+1 : close]
+	// STYLE.md rule 13: body indented 2 spaces from the CTE's own base.
+	// formatQuerySegment applies that indent itself -- adding it again
+	// here put a wrapped CTE body at 4, while a body that fitted on one
+	// line (which used to come back unindented) landed at the correct 2.
 	bodyIndent := baseIndent + 2
 	bodyLines := formatQuerySegment(inner, bodyIndent)
 	lines := lead
 	lines = append(lines, strings.Repeat(" ", baseIndent)+name+asText)
-	for _, l := range bodyLines {
-		lines = append(lines, strings.Repeat(" ", bodyIndent)+l)
-	}
+	lines = append(lines, bodyLines...)
 	closing := strings.Repeat(" ", baseIndent) + ")"
 	if tail := trimTokens(cte[close+1:]); len(tail) > 0 {
 		closing += " " + plainJoin(tail)
@@ -2068,4 +2131,92 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 	closing += trailingCommentSuffix(cte)
 	lines = append(lines, closing)
 	return lines
+}
+
+// subqueryIntroducers are the operators that take a parenthesized
+// subquery as their right-hand side. They matter for layout because the
+// paren then sits at the END of a line -- "where exists (" -- so the
+// paren's own column is a poor place to hang the body off: it would push
+// the whole subquery right by the width of the predicate that precedes
+// it, for no reason. The operator's own column is the construct's real
+// left edge, and that is what the body aligns to.
+var subqueryIntroducers = map[string]bool{
+	"exists": true, "in": true, "any": true, "all": true, "some": true,
+	// LATERAL is the same shape: "left join lateral (" ends a long join
+	// phrase, so hanging the derived table off the paren's own column
+	// pushes it a dozen columns right of anything it relates to and
+	// starts wrapping expressions that fitted before.
+	"lateral": true,
+}
+
+// subqueryIndents returns the column the subquery body's river should
+// start at, and the column its closing paren should sit at, for the "("
+// at toks[open] landing at column openCol.
+//
+// Two shapes, per STYLE.md rule 12's "indent the subquery body under
+// wherever it opens":
+//
+//   - after an introducing operator, the body aligns under the OPERATOR
+//     and the closing paren with it:
+//
+//     where exists (
+//     select 1
+//     from results res
+//     ...
+//     )
+//
+//     (the body's leftmost keyword lines up under "exists")
+//
+//   - otherwise the paren itself opens the construct -- a scalar
+//     subquery in a select list, a derived table in FROM -- so the body
+//     is indented inside it and the closing paren returns to its column.
+func subqueryIndents(toks []Token, open, openCol int, spaced bool) (body, close int) {
+	if introCol, ok := introducerCol(toks, open, openCol, spaced); ok {
+		return introCol, introCol
+	}
+	return openCol + 2, openCol
+}
+
+// introducerCol finds the start column of the operator phrase immediately
+// before the "(" at toks[open], if that operator is one that takes a
+// subquery. The column is derived by counting back from the paren rather
+// than tracked per token: the phrase is on the same line as the paren by
+// construction (renderRun has just written it), so its width is its
+// rendered width. A phrase that would start left of column 0 means it
+// actually wrapped, and is declined.
+func introducerCol(toks []Token, open, openCol int, spaced bool) (int, bool) {
+	if open == 0 {
+		return 0, false
+	}
+	// Matched on the word, not on TokKeyword: "any" and "some" are not in
+	// the lexer's keyword table (they are only operators in this one
+	// position, and adding them there would change how they lex
+	// everywhere else), so they arrive as TokIdent and would otherwise
+	// miss. A quoted identifier is never an operator, and the caller has
+	// already established that what follows is a subquery, so there is no
+	// real function-named-"any" to confuse this with.
+	prev := toks[open-1]
+	if prev.Kind != TokKeyword && prev.Kind != TokIdent {
+		return 0, false
+	}
+	if !subqueryIntroducers[prev.Lower] {
+		return 0, false
+	}
+	phrase := prev.Lower
+	if open >= 2 {
+		if pp := toks[open-2]; pp.Kind == TokKeyword && pp.Lower == "not" {
+			phrase = "not " + phrase
+		}
+	}
+	// openCol is the paren's column. The operator ends right before it,
+	// with a space between only when one was actually written -- "any("
+	// takes none (rule 4), and assuming one put its body a column off.
+	col := openCol - len(phrase)
+	if spaced {
+		col--
+	}
+	if col < 0 {
+		return 0, false
+	}
+	return col, true
 }

@@ -1,9 +1,9 @@
 with races_per_decade as (
-      select extract('year' from date_trunc('decade', date)) as decade,
-             count(*) as nbraces
-        from races
-    group by decade
-    order by decade
+    select extract('year' from date_trunc('decade', date)) as decade,
+           count(*) as nbraces
+      from races
+  group by decade
+  order by decade
 )
 select decade,
        nbraces,
