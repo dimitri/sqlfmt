@@ -275,3 +275,89 @@ func TestSubplanNameIsStructureNotAProperty(t *testing.T) {
 		t.Errorf("the InitPlan header should name the Limit, got %q", p.Root.Children[0].Type)
 	}
 }
+
+// A plan-advice block decorates the whole plan, not any node in it.
+// contrib/pg_plan_advice prints it after the tree; before this it was
+// collected as property lines of whatever node was on the stack, which
+// put "NO_GATHER(...)" on a Seq Scan.
+func TestPlanAdviceIsPlanLevel(t *testing.T) {
+	const plan = ` HashAggregate
+   Group Key: drivers.surname
+   ->  Hash Join
+         Hash Cond: (results.driverid = drivers.driverid)
+         ->  Seq Scan on results
+ Supplied Plan Advice:
+   JOIN_ORDER(drivers results races) /* matched */
+ Generated Plan Advice:
+   JOIN_ORDER(results races drivers)
+   SEQ_SCAN(alt_t1 alt_t2@exists_to_any_1)
+   NO_GATHER(results races drivers)
+`
+	p, err := Parse(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		for _, pr := range n.Props {
+			if strings.Contains(pr.Raw, "JOIN_ORDER") || strings.Contains(pr.Raw, "Plan Advice") {
+				t.Errorf("advice leaked into node %q as a property: %q", n.Type, pr.Raw)
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(p.Root)
+
+	if len(p.SuppliedAdvice) != 1 {
+		t.Fatalf("supplied advice = %d items, want 1", len(p.SuppliedAdvice))
+	}
+	got := p.SuppliedAdvice[0]
+	if got.Kind != "JOIN_ORDER" || got.Annotation != "matched" {
+		t.Errorf("supplied[0] = kind %q annotation %q, want JOIN_ORDER / matched", got.Kind, got.Annotation)
+	}
+	if got.String() != "JOIN_ORDER(drivers results races)" {
+		t.Errorf("supplied[0].String() = %q — the annotation must not survive into the item itself", got.String())
+	}
+
+	if len(p.GeneratedAdvice) != 3 {
+		t.Fatalf("generated advice = %d items, want 3", len(p.GeneratedAdvice))
+	}
+	// A target can carry a subplan qualifier; it is part of the arg.
+	// Each target is its own argument, and a target may carry a subplan
+	// qualifier.
+	if got := strings.Join(p.GeneratedAdvice[1].Args, "|"); got != "alt_t1|alt_t2@exists_to_any_1" {
+		t.Errorf("generated[1] args = %q", p.GeneratedAdvice[1].Args)
+	}
+	// The tree is untouched by all of this.
+	if p.Root.Type != "hash-aggregate" || len(p.Root.Children) != 1 {
+		t.Errorf("the plan tree changed shape: %q with %d children", p.Root.Type, len(p.Root.Children))
+	}
+}
+
+// SetOp spells its strategy into the node name and its command after it;
+// collapsing both to "Set Op" lost which set operation this even was.
+func TestSetOpKeepsStrategyAndCommand(t *testing.T) {
+	for _, tc := range []struct{ line, label, strategy, command string }{
+		{" HashSetOp Except  (cost=1.00..2.00 rows=1 width=4)", "HashSetOp Except", "Hashed", "Except"},
+		{" SetOp Intersect All  (cost=1.00..2.00 rows=1 width=4)", "SetOp Intersect All", "Sorted", "Intersect All"},
+		{" HashSetOp Except All  (cost=1.00..2.00 rows=1 width=4)", "HashSetOp Except All", "Hashed", "Except All"},
+	} {
+		p, err := Parse(tc.line + "\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := NodeLabel(p.Root); got != tc.label {
+			t.Errorf("NodeLabel = %q, want %q", got, tc.label)
+		}
+		if p.Root.Type != "set-op" {
+			t.Errorf("type = %q, want set-op (the colour category is shared)", p.Root.Type)
+		}
+		nt, strategy, command, ok := splitStrategyLabel(p.Root)
+		if !ok || nt != "SetOp" || strategy != tc.strategy || command != tc.command {
+			t.Errorf("json split = %q/%q/%q, want SetOp/%q/%q", nt, strategy, command, tc.strategy, tc.command)
+		}
+	}
+}

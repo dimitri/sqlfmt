@@ -3,6 +3,7 @@ package explain
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // ToJSON renders a Plan as EXPLAIN (FORMAT JSON) output.
@@ -36,6 +37,22 @@ func ToJSON(p *Plan) ([]byte, error) {
 
 func nodeToJSON(n *Node) map[string]any {
 	m := map[string]any{"Node Type": NodeLabel(n)}
+
+	// Aggregate and SetOp spell their strategy (and, for SetOp, their
+	// command) INTO the TEXT node name, while JSON reports the bare node
+	// type plus separate "Strategy" and "Command" keys. Writing
+	// "HashSetOp Except" as a JSON Node Type would produce something no
+	// server ever emits and no JSON consumer recognises, so it is taken
+	// apart again here -- the exact inverse of jsonNodeLabel.
+	if nodeType, strategy, command, ok := splitStrategyLabel(n); ok {
+		m["Node Type"] = nodeType
+		if strategy != "" {
+			m["Strategy"] = strategy
+		}
+		if command != "" {
+			m["Command"] = command
+		}
+	}
 	if n.Prefix != "" {
 		if n.Prefix == "Parallel" {
 			m["Parallel Aware"] = true
@@ -97,6 +114,32 @@ func nodeToJSON(n *Node) map[string]any {
 		m["Plans"] = kids
 	}
 	return m
+}
+
+// splitStrategyLabel undoes the TEXT name for the two node types that
+// encode a planner strategy in it.
+func splitStrategyLabel(n *Node) (nodeType, strategy, command string, ok bool) {
+	switch n.Type {
+	case "hash-aggregate":
+		return "Aggregate", "Hashed", "", true
+	case "group-aggregate":
+		return "Aggregate", "Sorted", "", true
+	case "mixed-aggregate":
+		return "Aggregate", "Mixed", "", true
+	case "aggregate":
+		return "Aggregate", "Plain", "", true
+	case "set-op":
+		strategy = "Sorted"
+		label := n.Label
+		if strings.HasPrefix(label, "HashSetOp") {
+			strategy = "Hashed"
+			label = strings.TrimPrefix(label, "HashSetOp")
+		} else {
+			label = strings.TrimPrefix(label, "SetOp")
+		}
+		return "SetOp", strategy, strings.TrimSpace(label), true
+	}
+	return "", "", "", false
 }
 
 func typedJSONValue(spec PropSpec, v string) any {

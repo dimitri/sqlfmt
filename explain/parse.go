@@ -76,6 +76,37 @@ type Plan struct {
 	Root          *Node
 	PlanningTime  *float64 // ms
 	ExecutionTime *float64 // ms
+
+	// GeneratedAdvice and SuppliedAdvice are the plan-advice blocks
+	// contrib/pg_plan_advice prints after the tree:
+	//
+	//	 Generated Plan Advice:
+	//	   JOIN_ORDER(results races drivers)
+	//	   SEQ_SCAN(alt_t1 alt_t2@exists_to_any_1)
+	//
+	// They decorate the whole plan rather than any node in it, so they
+	// hang off Plan as a sibling of Root rather than being forced into
+	// the tree. Before this they were collected as property lines of
+	// whatever node happened to be on the stack when the block started,
+	// which put "NO_GATHER(...)" on a Seq Scan -- and made them the
+	// largest remaining class of unrecognised property.
+	//
+	// Supplied advice is what the caller asked for and can carry a
+	// per-item annotation ("/* matched */"); generated advice is what
+	// the planner would emit to reproduce the plan it chose.
+	GeneratedAdvice []AdviceItem
+	SuppliedAdvice  []AdviceItem
+}
+
+// AdviceItem is one line of a plan-advice block.
+type AdviceItem struct {
+	AdviceLine
+	// Raw is the line as printed, annotation included.
+	Raw string
+	// Annotation is the text of a trailing /* ... */ comment, without
+	// the delimiters -- "matched" on supplied advice the planner was
+	// able to honour. Empty when there is none.
+	Annotation string
 }
 
 // HasPlan reports whether text looks like it contains a captured EXPLAIN
@@ -102,6 +133,39 @@ var rowsFooterRE = regexp.MustCompile(`^\(\d+ rows?\)`)
 // psprintf("SubPlan %s").
 var subplanHeaderRE = regexp.MustCompile(`^(CTE|InitPlan|SubPlan) `)
 
+// adviceAnnotationRE matches the trailing "/* matched */" pg_plan_advice
+// puts on a supplied advice item it was able to honour.
+var adviceAnnotationRE = regexp.MustCompile(`\s*/\*\s*(.*?)\s*\*/\s*$`)
+
+// unbalancedParens reports whether s has more "(" than ")", meaning an
+// advice item is still incomplete.
+func unbalancedParens(s string) bool {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return depth > 0
+}
+
+// parseAdviceItem parses one line of a plan-advice block.
+func parseAdviceItem(line string) (AdviceItem, bool) {
+	body, annotation := line, ""
+	if m := adviceAnnotationRE.FindStringSubmatch(line); m != nil {
+		annotation = m[1]
+		body = strings.TrimSpace(adviceAnnotationRE.ReplaceAllString(line, ""))
+	}
+	parsed, ok := ParseAdviceLine(body)
+	if !ok {
+		return AdviceItem{}, false
+	}
+	return AdviceItem{AdviceLine: parsed, Raw: line, Annotation: annotation}, true
+}
+
 // Parse parses psql's default TEXT-format EXPLAIN output (out, the full
 // captured stdout — may include preceding SET/other statement echoes,
 // which are skipped) into a Plan.
@@ -121,6 +185,12 @@ func Parse(out string) (*Plan, error) {
 	// A subplan header names the node on the NEXT "->" line, so it is
 	// held here until that node is built.
 	var pendingSubplanName string
+
+	// Set while reading a plan-advice block; points at the slice its
+	// items belong to. adviceBuf accumulates an item psql wrapped over
+	// several output lines.
+	var adviceTarget *[]AdviceItem
+	var adviceBuf string
 
 	for _, line := range lines {
 		if m := planningTimeRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
@@ -171,6 +241,40 @@ func Parse(out string) (*Plan, error) {
 			plan.Root = parseNodeLine(trimmed)
 			stack = append(stack, frame{depth: 0, node: plan.Root})
 			continue
+		}
+
+		switch trimmed {
+		case "Generated Plan Advice:":
+			adviceTarget = &plan.GeneratedAdvice
+			continue
+		case "Supplied Plan Advice:":
+			adviceTarget = &plan.SuppliedAdvice
+			continue
+		}
+		if adviceTarget != nil {
+			// An advice item can be wider than psql's output column and
+			// arrive split across lines, so accumulate until the
+			// parentheses balance rather than judging each line alone.
+			// A long INDEX_SCAN over a partitioned table routinely wraps
+			// three ways.
+			if adviceBuf == "" {
+				adviceBuf = trimmed
+			} else {
+				adviceBuf += " " + trimmed
+			}
+			if item, ok := parseAdviceItem(adviceBuf); ok {
+				*adviceTarget = append(*adviceTarget, item)
+				adviceBuf = ""
+				continue
+			}
+			if unbalancedParens(adviceBuf) {
+				continue // more of this item is still to come
+			}
+			// Balanced and still not advice: the block is over. Put the
+			// line back on the ordinary path.
+			adviceTarget = nil
+			trimmed = adviceBuf
+			adviceBuf = ""
 		}
 
 		if subplanHeaderRE.MatchString(trimmed) {

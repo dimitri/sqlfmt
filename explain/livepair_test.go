@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestLiveTextJSONAgree(t *testing.T) {
 			if err != nil {
 				t.Skipf("query not runnable here: %v", err)
 			}
-			jsonOut, err := psql(db, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+q.sql, unaligned)
+			jsonOut, err := psqlToFile(t, db, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+q.sql)
 			if err != nil {
 				t.Fatalf("JSON EXPLAIN failed after TEXT succeeded: %v", err)
 			}
@@ -154,6 +155,29 @@ func rawOf(n *Node) []string {
 //   - JSON must be UNALIGNED. Aligned output pads a multi-line column
 //     value and marks each continuation with a trailing "+", which is
 //     not JSON any more.
+//
+// psqlToFile captures a JSON plan the way this project's own capture
+// tool does: psql -o sends the result to a file rather than into stdout,
+// so nothing psql says on the side can end up in it.
+//
+// -A is still required, and is not an alternative to -o. The two control
+// different things: -o picks the destination, -A picks the format. In
+// aligned mode psql pads a multi-line column value and marks every
+// continuation with a trailing "+", which is not JSON any more, and it
+// does that whether the destination is a terminal or a file -- confirmed
+// against \o, \t and -o in every combination. cmd/sqlbuild in the app
+// repo reaches the same conclusion from the other direction: it adds
+// "-t -A" exactly when the SQL it is running contains a \o redirect.
+func psqlToFile(t *testing.T, db, sql string) (string, error) {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "plan.json")
+	if _, err := psql(db, sql, unaligned, "-o", out); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(out)
+	return string(data), err
+}
+
 type psqlAlign bool
 
 const (
@@ -161,8 +185,9 @@ const (
 	unaligned psqlAlign = false
 )
 
-func psql(db, sql string, align psqlAlign) (string, error) {
+func psql(db, sql string, align psqlAlign, extra ...string) (string, error) {
 	args := []string{"-X", "-q", "-t", "-v", "ON_ERROR_STOP=1"}
+	args = append(args, extra...)
 	if !align {
 		args = append(args, "-A")
 	}
