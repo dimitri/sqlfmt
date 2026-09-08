@@ -120,6 +120,47 @@ and worth reading before relying on it — chiefly that index names are not
 schema-qualified, and that this is a **comparison key, not a
 round-trippable advice string**.
 
+### Comparing across sources: `-canonical`
+
+Those differences matter as soon as the two plans did not come from the
+same place — comparing a plan from the server you run today against one a
+PostgreSQL 19 server printed itself, which is what upgrade verification
+looks like. The two agree on the decisions and disagree on how they write
+them down:
+
+- **Relation order inside a line.** 19 emits `NO_GATHER` from a
+  `Bitmapset`, so its targets come out in range-table order, stable per
+  *query*; `sqlfmt` walks the plan tree, stable per *plan*. Neither is
+  recoverable from the other, and for a set-valued tag the order means
+  nothing anyway.
+- **Schema qualifiers.** `pgpa_output_relation_name()` qualifies index
+  names unconditionally — 19 always prints `public.foo_pkey`, text EXPLAIN
+  always prints `foo_pkey`. And `EXPLAIN (VERBOSE)` qualifies *relations*,
+  which 19's identifiers never do.
+
+`-canonical` normalizes both away: set-valued targets are sorted,
+`JOIN_ORDER` is left alone because its order is meaning, index pairs sort
+together as pairs, and schema qualifiers are dropped.
+
+```console
+$ sqlfmt explain advice -canonical pg16-plan.txt     # reconstructed here
+$ sqlfmt explain canonical pg19-plan.txt             # what 19 printed
+$ sqlfmt explain diff -canonical before.txt after.txt
+```
+
+`explain canonical` reads an advice block a server already printed —
+give it a whole `EXPLAIN (PLAN_ADVICE)` capture and it finds the block
+inside — so the two sides can be put next to each other:
+
+```console
+$ diff <(sqlfmt explain advice -canonical pg16-plan.txt) \
+       <(sqlfmt explain canonical pg19-plan.txt)
+```
+
+Canonical output is even further from being valid advice than the default:
+sorting `JOIN_ORDER` would change its meaning, so it is not sorted, and a
+bare index name is ambiguous. It is a comparison key and nothing else.
+
 As a library: `import "github.com/dimitri/sqlfmt/format"` (module path TBD —
 not yet published), `format.Format(io.Reader) (string, error)`, so callers
 like `app.taop.xyz`'s `cmd/sqlbuild` book-build tool can format embedded

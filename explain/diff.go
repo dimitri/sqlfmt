@@ -35,6 +35,12 @@ type Diff struct {
 	// well-formed header.
 	BeforeName string
 	AfterName  string
+
+	// Canonical records that both sides were canonicalized before
+	// comparison, so the rendered diff can say so: a reader looking at a
+	// quiet diff deserves to know whether it is quiet because nothing
+	// changed or because differences were normalized away.
+	Canonical bool
 }
 
 // AdviceChange is one structural difference: an advice tag whose targets
@@ -52,7 +58,21 @@ func (d *Diff) SameStructure() bool { return len(d.Structural) == 0 }
 // DiffPlans compares two plans. Either may be nil, which is reported as a
 // wholesale appearance or disappearance rather than treated as an error.
 func DiffPlans(before, after *Plan) *Diff {
-	d := &Diff{Before: before, After: after}
+	return diffPlans(before, after, false)
+}
+
+// DiffPlansCanonical is DiffPlans with both sides put into canonical form
+// first, so that advice orderings and schema-qualified index names do not
+// show up as differences. Use it when the two plans did not come from the
+// same source — comparing a plan from the server you run today against one
+// from a PostgreSQL 19 server, for instance, where the two agree on the
+// decisions but not on how they write them down.
+func DiffPlansCanonical(before, after *Plan) *Diff {
+	return diffPlans(before, after, true)
+}
+
+func diffPlans(before, after *Plan, canonical bool) *Diff {
+	d := &Diff{Before: before, After: after, Canonical: canonical}
 
 	type entry struct{ before, after string }
 	// Insertion-ordered so the report follows advice emission order —
@@ -75,8 +95,12 @@ func DiffPlans(before, after *Plan) *Diff {
 			}
 		}
 	}
-	take(Advice(before), false)
-	take(Advice(after), true)
+	advice := Advice
+	if canonical {
+		advice = CanonicalAdvice
+	}
+	take(advice(before), false)
+	take(advice(after), true)
 
 	for _, kind := range order {
 		e := seen[kind]
@@ -119,7 +143,11 @@ func (d *Diff) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "--- %s\n", beforeName)
 	fmt.Fprintf(&b, "+++ %s\n", afterName)
-	b.WriteString("@@ plan structure @@\n")
+	if d.Canonical {
+		b.WriteString("@@ plan structure (canonical) @@\n")
+	} else {
+		b.WriteString("@@ plan structure @@\n")
+	}
 
 	if d.SameStructure() {
 		b.WriteString(" structure unchanged - the planner made the same decisions\n")
