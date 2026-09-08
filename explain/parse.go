@@ -48,8 +48,14 @@ type Node struct {
 	RowsActual   *int64 // nil when ANALYZE wasn't used
 	TimeActual   *float64
 	Loops        *int64
-	Props        []string // raw, trimmed property lines, document order
-	Children     []*Node
+	// Props are the node's indented property lines in document order.
+	// Each carries its raw text plus, where recognised, the JSON-format
+	// keys and values EXPLAIN (FORMAT JSON) would have reported for the
+	// same line -- see props.go. Prop.Raw is always the exact captured
+	// line, so a renderer that prints properties verbatim is unaffected
+	// by how much of a line this package understood.
+	Props    []Prop
+	Children []*Node
 }
 
 // Plan is the Go equivalent of explain-plan-parser.lisp's defstruct plan.
@@ -141,7 +147,7 @@ func Parse(out string) (*Plan, error) {
 		}
 
 		if len(stack) > 0 {
-			stack[len(stack)-1].node.Props = append(stack[len(stack)-1].node.Props, trimmed)
+			stack[len(stack)-1].node.Props = append(stack[len(stack)-1].node.Props, ParseProp(trimmed))
 		}
 	}
 

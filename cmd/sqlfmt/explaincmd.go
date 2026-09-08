@@ -43,6 +43,8 @@ func runExplain(args []string) int {
 		return runExplainDiff(args[1:])
 	case "canonical":
 		return runExplainCanonical(args[1:])
+	case "json":
+		return runExplainJSON(args[1:])
 	case "help", "-h", "--help":
 		explainUsage()
 		return 0
@@ -66,6 +68,13 @@ commands:
 
   canonical [advice]      read an advice block that a server already
                           printed and normalize it the same way
+
+  json [plan]             re-emit a TEXT plan as EXPLAIN (FORMAT JSON),
+                          so a pasted plan can be handed to a tool that
+                          only reads JSON. Emits only what the TEXT
+                          actually carried: no Output list, no buffer
+                          counters, no Plan Width unless they were on
+                          the page.
 
 Both advice and diff take -canonical, which normalizes advice before it is printed or
 compared: set-valued targets are sorted and schema qualifiers dropped.
@@ -216,5 +225,53 @@ func runExplainCanonical(args []string) int {
 		return 2
 	}
 	fmt.Println(out)
+	return 0
+}
+
+// runExplainJSON re-emits a TEXT plan in EXPLAIN (FORMAT JSON) form.
+//
+// The point is interoperability with the tools that only read JSON --
+// pgMustard, pev2's better-supported path -- from the plan a reader
+// actually has in hand, which is nearly always the TEXT one psql
+// printed. See explain.ToJSON on what it does and does not invent.
+func runExplainJSON(args []string) int {
+	fs := flag.NewFlagSet("sqlfmt explain json", flag.ExitOnError)
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: sqlfmt explain json [plan]") }
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 1 {
+		fs.Usage()
+		return 2
+	}
+
+	var (
+		src  []byte
+		name string
+		err  error
+	)
+	if fs.NArg() == 0 {
+		name, src, err = "<standard input>", nil, nil
+		src, err = io.ReadAll(os.Stdin)
+	} else {
+		name = fs.Arg(0)
+		src, err = os.ReadFile(name)
+	}
+	if err != nil {
+		report(err)
+		return 2
+	}
+
+	plan, err := explain.Parse(string(src))
+	if err != nil {
+		report(fmt.Errorf("%s: %w", name, err))
+		return 2
+	}
+	out, err := explain.ToJSON(plan)
+	if err != nil {
+		report(err)
+		return 2
+	}
+	fmt.Println(string(out))
 	return 0
 }

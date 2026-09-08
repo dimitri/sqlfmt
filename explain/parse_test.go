@@ -63,7 +63,7 @@ func TestParseSimplePlan(t *testing.T) {
 	if seqScan.Type != "seq-scan" || seqScan.Relation != "results" {
 		t.Fatalf("expected Seq Scan on results, got type=%q relation=%q", seqScan.Type, seqScan.Relation)
 	}
-	if len(seqScan.Props) != 1 || seqScan.Props[0] != "Filter: (raceid = 890)" {
+	if len(seqScan.Props) != 1 || seqScan.Props[0].Raw != "Filter: (raceid = 890)" {
 		t.Fatalf("unexpected props: %+v", seqScan.Props)
 	}
 	if plan.PlanningTime != nil || plan.Root.TimeActual != nil {
@@ -191,8 +191,8 @@ func TestParseKeepsTimingsAfterPlanningBlock(t *testing.T) {
 	// as a property of the deepest plan node.
 	scan := plan.Root.Children[0]
 	for _, p := range scan.Props {
-		if strings.Contains(p, "hit=61") {
-			t.Fatalf("planning-block line leaked into node props: %q", p)
+		if strings.Contains(p.Raw, "hit=61") {
+			t.Fatalf("planning-block line leaked into node props: %q", p.Raw)
 		}
 	}
 }
