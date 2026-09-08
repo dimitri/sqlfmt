@@ -82,6 +82,7 @@ var nodeTypeTokens = []struct {
 	{"Limit", "limit"},
 	{"Lock Rows", "lock-rows"},
 	{"LockRows", "lock-rows"},
+	{"HashSetOp", "set-op"},
 	{"Set Op", "set-op"},
 	{"SetOp", "set-op"},
 	{"Result", "result"},

@@ -54,8 +54,21 @@ type Node struct {
 	// same line -- see props.go. Prop.Raw is always the exact captured
 	// line, so a renderer that prints properties verbatim is unaffected
 	// by how much of a line this package understood.
-	Props    []Prop
-	Children []*Node
+	Props []Prop
+	// SubplanName is the name of the subtree this node roots, when it is
+	// one: "CTE x", "InitPlan 1 (returns $0)", "SubPlan 2".
+	//
+	// In TEXT this arrives as a bare line above the node's own "->" line,
+	// which used to read as a property of the PARENT -- and was the
+	// single largest class of unrecognised property line in PostgreSQL's
+	// own regression corpus. It is not a property at all: explain.c
+	// prints the same plan_name string here as
+	// appendStringInfo("%s\n", plan_name) and in every other format as
+	// ExplainPropertyText("Subplan Name", plan_name) on this node.
+	// Modelling it as a field puts the TEXT and JSON readings back on
+	// the same footing.
+	SubplanName string
+	Children    []*Node
 }
 
 // Plan is the Go equivalent of explain-plan-parser.lisp's defstruct plan.
@@ -83,6 +96,12 @@ var arrowRE = regexp.MustCompile(`^(\s*)->\s+`)
 var separatorRE = regexp.MustCompile(`^\s*[═=─-]{5,}\s*$`)
 var rowsFooterRE = regexp.MustCompile(`^\(\d+ rows?\)`)
 
+// subplanHeaderRE matches the bare name line EXPLAIN prints above a
+// subplan's own node line. explain.c builds exactly these three shapes,
+// as psprintf("CTE %s"), psprintf("InitPlan %s") and
+// psprintf("SubPlan %s").
+var subplanHeaderRE = regexp.MustCompile(`^(CTE|InitPlan|SubPlan) `)
+
 // Parse parses psql's default TEXT-format EXPLAIN output (out, the full
 // captured stdout — may include preceding SET/other statement echoes,
 // which are skipped) into a Plan.
@@ -98,6 +117,10 @@ func Parse(out string) (*Plan, error) {
 		node  *Node
 	}
 	var stack []frame
+
+	// A subplan header names the node on the NEXT "->" line, so it is
+	// held here until that node is built.
+	var pendingSubplanName string
 
 	for _, line := range lines {
 		if m := planningTimeRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
@@ -130,6 +153,10 @@ func Parse(out string) (*Plan, error) {
 				parent := stack[len(stack)-1].node
 				parent.Children = append(parent.Children, node)
 			}
+			if pendingSubplanName != "" {
+				node.SubplanName = pendingSubplanName
+				pendingSubplanName = ""
+			}
 			stack = append(stack, frame{depth: depth, node: node})
 			continue
 		}
@@ -143,6 +170,11 @@ func Parse(out string) (*Plan, error) {
 			// The very first non-arrow line is the root node.
 			plan.Root = parseNodeLine(trimmed)
 			stack = append(stack, frame{depth: 0, node: plan.Root})
+			continue
+		}
+
+		if subplanHeaderRE.MatchString(trimmed) {
+			pendingSubplanName = trimmed
 			continue
 		}
 

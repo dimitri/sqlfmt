@@ -1,6 +1,7 @@
 package explain
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -225,5 +226,52 @@ func TestParsePropBlockHeader(t *testing.T) {
 		if p.Label != h[:len(h)-1] || p.Value != "" {
 			t.Errorf("ParseProp(%q) = Label %q Value %q, want the header name and no value", h, p.Label, p.Value)
 		}
+	}
+}
+
+// A subplan header is structure, not a property. It used to be collected
+// as a Prop of the PARENT node -- the single largest class of
+// unrecognised property line across PostgreSQL's regression corpus (268
+// of 1076 occurrences) -- and it names the node BELOW it.
+func TestSubplanNameIsStructureNotAProperty(t *testing.T) {
+	const plan = ` Aggregate  (cost=1.05..1.06 rows=1 width=8)
+   InitPlan 1 (returns $0)
+     ->  Limit  (cost=0.00..0.02 rows=1 width=4)
+           ->  Seq Scan on onek  (cost=0.00..13.00 rows=1000 width=4)
+   ->  Result  (cost=0.00..1.01 rows=1 width=8)
+   CTE x
+     ->  Seq Scan on onek onek_1  (cost=0.00..13.00 rows=1000 width=4)
+`
+	p, err := Parse(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pr := range p.Root.Props {
+		if strings.HasPrefix(pr.Raw, "InitPlan") || strings.HasPrefix(pr.Raw, "CTE ") {
+			t.Errorf("subplan header collected as a property of the parent: %q", pr.Raw)
+		}
+	}
+
+	var names []string
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		if n.SubplanName != "" {
+			names = append(names, n.SubplanName)
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(p.Root)
+
+	want := []string{"InitPlan 1 (returns $0)", "CTE x"}
+	if strings.Join(names, "|") != strings.Join(want, "|") {
+		t.Errorf("SubplanName values = %q, want %q", names, want)
+	}
+
+	// The named node is the one below the header, not beside it.
+	if p.Root.Children[0].Type != "limit" {
+		t.Errorf("the InitPlan header should name the Limit, got %q", p.Root.Children[0].Type)
 	}
 }

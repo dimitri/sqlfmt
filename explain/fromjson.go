@@ -66,6 +66,7 @@ func jsonNode(m map[string]any) *Node {
 	typ, prefix, label, _ := matchNodeType(jsonNodeLabel(m))
 	n.Type, n.Prefix, n.Label = typ, prefix, label
 
+	n.SubplanName, _ = m["Subplan Name"].(string)
 	n.Relation, _ = m["Relation Name"].(string)
 	n.Index, _ = m["Index Name"].(string)
 	if alias, _ := m["Alias"].(string); alias != "" && alias != n.Relation {
@@ -113,6 +114,34 @@ func jsonNode(m map[string]any) *Node {
 // join is the unmarked case and TEXT prints no join word for it.
 func jsonNodeLabel(m map[string]any) string {
 	nodeType, _ := m["Node Type"].(string)
+	strategy, _ := m["Strategy"].(string)
+
+	// Aggregate and SetOp are the two nodes whose TEXT name encodes the
+	// strategy that JSON reports as its own field: explain.c picks pname
+	// "HashAggregate" / "GroupAggregate" / "MixedAggregate" /
+	// "Aggregate" from AGG_HASHED / AGG_SORTED / AGG_MIXED / AGG_PLAIN,
+	// and "HashSetOp" / "SetOp" from SETOP_HASHED / SETOP_SORTED, while
+	// JSON always writes {"Node Type": "Aggregate", "Strategy":
+	// "Hashed"}. Without this a hash aggregate read from JSON classified
+	// as a plain aggregate and got the wrong diagram colour.
+	switch nodeType {
+	case "Aggregate":
+		switch strategy {
+		case "Hashed":
+			nodeType = "HashAggregate"
+		case "Sorted":
+			nodeType = "GroupAggregate"
+		case "Mixed":
+			nodeType = "MixedAggregate"
+		}
+	case "SetOp":
+		if strategy == "Hashed" {
+			nodeType = "HashSetOp"
+		}
+		if cmd, _ := m["Command"].(string); cmd != "" {
+			nodeType += " " + cmd
+		}
+	}
 
 	if jt, _ := m["Join Type"].(string); jt != "" && jt != "Inner" {
 		switch nodeType {
@@ -144,11 +173,15 @@ func jsonNodeLabel(m map[string]any) string {
 // own line ("Parallel Aware", "Node Type", "Plans", ...).
 var jsonPropOrder = []string{
 	"Output",
+	// Keys before conditions: explain.c calls show_agg_keys() before
+	// show_upper_qual(..., "Filter") on an Agg node, so a HashAggregate
+	// prints "Group Key" above "Filter". No node carries both a key and
+	// a scan condition, so one order serves every node type.
+	"Window", "Sort Key", "Presorted Key", "Group Key", "Hash Key", "Cache Key", "Cache Mode",
 	"Index Cond", "Recheck Cond", "TID Cond", "Merge Cond", "Hash Cond",
 	"Join Filter", "One-Time Filter", "Filter", "Run Condition",
 	"Rows Removed by Index Recheck", "Rows Removed by Join Filter", "Rows Removed by Filter",
 	"Heap Fetches", "Index Searches", "Order By",
-	"Sort Key", "Presorted Key", "Group Key", "Hash Key", "Cache Key", "Cache Mode",
 	"Subplans Removed", "Workers Planned", "Workers Launched",
 	"Function Call", "Table Function Call",
 	// Citus.
@@ -163,6 +196,16 @@ var jsonComposites = []func(map[string]any) (string, bool){
 	compMemoize, compStorage, compBuffers, compIOTimings, compWAL, compMemory,
 }
 
+// zeroOmittedInText are the properties TEXT suppresses at zero while
+// JSON reports them regardless.
+var zeroOmittedInText = map[string]bool{
+	"Rows Removed by Filter":          true,
+	"Rows Removed by Join Filter":     true,
+	"Rows Removed by Index Recheck":   true,
+	"Rows Removed by Conflict Filter": true,
+	"Subplans Removed":                true,
+}
+
 func jsonProps(m map[string]any) []Prop {
 	var props []Prop
 	emit := func(line string) { props = append(props, ParseProp(line)) }
@@ -174,6 +217,16 @@ func jsonProps(m map[string]any) []Prop {
 		}
 		text := jsonScalarText(v)
 		if text == "" {
+			continue
+		}
+		// A handful of counters are printed in TEXT only when non-zero
+		// and in every other format unconditionally -- explain.c spells
+		// this `if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)`
+		// for the Rows Removed family and `nplans < nchildren || ...`
+		// for Subplans Removed. JSON therefore carries zeros that no
+		// TEXT capture ever showed, and emitting them would invent a
+		// line the server did not print.
+		if text == "0" && zeroOmittedInText[key] {
 			continue
 		}
 		spec, known := LookupPropSpec(key)
@@ -324,7 +377,10 @@ func compHashAggInfo(m map[string]any) (string, bool) {
 	if mem, ok := jsonNumberText(m, "Peak Memory Usage"); ok {
 		seg += "  Memory Usage: " + mem + "kB"
 	}
-	if disk, ok := jsonNumberText(m, "Disk Usage"); ok {
+	// "Only display disk usage if we spilled to disk" -- show_hashagg_info
+	// gates the TEXT segment on hash_batches_used > 1, while JSON reports
+	// Disk Usage unconditionally (as 0 when nothing spilled).
+	if disk, ok := jsonNumberText(m, "Disk Usage"); ok && batches != "1" && batches != "0" {
 		seg += "  Disk Usage: " + disk + "kB"
 	}
 	return seg, true

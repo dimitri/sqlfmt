@@ -43,6 +43,9 @@ func nodeToJSON(n *Node) map[string]any {
 			m["Partial Mode"] = n.Prefix
 		}
 	}
+	if n.SubplanName != "" {
+		m["Subplan Name"] = n.SubplanName
+	}
 	if n.Relation != "" {
 		m["Relation Name"] = n.Relation
 	}
