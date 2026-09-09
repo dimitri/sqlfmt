@@ -36,6 +36,60 @@ jobs:
       - name: test
         run: make test
 
+  # ── Parse every EXPLAIN plan PostgreSQL's own regression suite prints ──────
+  # explain/pgregress_test.go skips itself unless PGREGRESS_DIR points at a
+  # source tree, because vendoring one into this repo would be absurd: the
+  # corpus is 13MB of expected output that upstream already maintains, and a
+  # copy here would be stale the day it landed.
+  #
+  # It does not need a source tree, though -- only the expected/*.out files.
+  # A blobless, shallow, sparse checkout fetches exactly those: 18MB and a
+  # few seconds, against roughly a gigabyte for a full clone. That is what
+  # makes this affordable on every pull request rather than a nightly job,
+  # and running it on every PR is the point -- it is the only test here that
+  # sees plan shapes nobody in this project would think to write (partition
+  # pruning, incremental sort, memoize, custom scans, MERGE, JIT).
+  #
+  # The matrix is the two branches the parser targets. They disagree: each
+  # release adds plan shapes and EXPLAIN properties, so a corpus that passes
+  # on 17 says nothing about 18. Branches rather than a pinned tag, so the
+  # job keeps testing against what those branches actually became.
+  pgregress:
+    name: PostgreSQL regression corpus
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [REL_17_STABLE, REL_18_STABLE, master]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # --filter=blob:none --no-checkout gets the tree without any file
+      # contents; the sparse-checkout patterns then decide which blobs are
+      # worth fetching. --no-cone because these are path globs, which the
+      # cone mode deliberately does not support.
+      - name: fetch the expected output for ${{ matrix.branch }}
+        run: |
+          git clone --filter=blob:none --no-checkout --depth 1 \
+            --branch ${{ matrix.branch }} \
+            https://github.com/postgres/postgres.git pgsrc
+          cd pgsrc
+          git sparse-checkout set --no-cone \
+            'src/test/regress/expected/*.out' \
+            'src/test/modules/*/expected/*.out' \
+            'contrib/*/expected/*.out'
+          git checkout
+          echo "fetched $(find . -path '*/expected/*.out' | wc -l) files, $(du -sh . | cut -f1)"
+
+      - name: parse every plan in it
+        env:
+          PGREGRESS_DIR: pgsrc
+        run: go test ./explain/ -run TestPGRegress -v
+
   # ── Build + smoke-test the browser WebAssembly module ──────────────────────
   # Runs on every push and PR so a wasm/ regression is caught before merge,
   # not just when publish-wasm-dev (push-to-main only) would otherwise be the
@@ -82,7 +136,7 @@ jobs:
   # clojure-integration-tests.yml, publish-dev job).
   publish-wasm-dev:
     name: Publish wasm-dev release
-    needs: [test, wasm]
+    needs: [test, pgregress, wasm]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:

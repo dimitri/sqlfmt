@@ -101,6 +101,32 @@ func TestPGRegressCorpus(t *testing.T) {
 	if parsed == 0 {
 		t.Fatal("parsed nothing at all")
 	}
+
+	// Floors, not exact numbers. The corpus grows with every Postgres
+	// release and its contents differ per branch, so asserting a count
+	// would fail on the next minor and teach everyone to update it
+	// without reading it. A ratio does not move for that reason -- it
+	// moves when the parser regresses, which is the thing worth
+	// failing on.
+	//
+	// Set just under what the branches this targets currently reach
+	// (PG18: 2620/2625 parsed, 98.4% of properties known), so the gap
+	// is real breakage rather than the ordinary drift of a corpus that
+	// gains a plan shape or an unrecognised property each release.
+	// Raise them when a release settles higher; that is the ratchet.
+	const (
+		minParseRate  = 0.99
+		minKnownProps = 0.95
+	)
+	if rate := float64(parsed) / float64(plans); rate < minParseRate {
+		t.Errorf("parsed %d/%d plans (%.1f%%), below the %.0f%% floor",
+			parsed, plans, 100*rate, 100*minParseRate)
+	}
+	total := knownProps + sumCounts(unknownProps)
+	if rate := float64(knownProps) / float64(total); total > 0 && rate < minKnownProps {
+		t.Errorf("recognised %d/%d properties (%.1f%%), below the %.0f%% floor",
+			knownProps, total, 100*rate, 100*minKnownProps)
+	}
 }
 
 // extractPlanBlocks pulls each "QUERY PLAN" block out of a psql
