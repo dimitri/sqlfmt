@@ -26,6 +26,7 @@
 package explain
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -127,6 +128,9 @@ var arrowRE = regexp.MustCompile(`^(\s*)->\s+`)
 var separatorRE = regexp.MustCompile(`^\s*[═=─-]{5,}\s*$`)
 var rowsFooterRE = regexp.MustCompile(`^\(\d+ rows?\)`)
 
+// emptyRowsFooterRE is the footer of a result set with nothing in it.
+var emptyRowsFooterRE = regexp.MustCompile(`(?m)^\s*\(0 rows\)\s*$`)
+
 // subplanHeaderRE matches the bare name line EXPLAIN prints above a
 // subplan's own node line. explain.c builds exactly these three shapes,
 // as psprintf("CTE %s"), psprintf("InitPlan %s") and
@@ -169,9 +173,40 @@ func parseAdviceItem(line string) (AdviceItem, bool) {
 // Parse parses psql's default TEXT-format EXPLAIN output (out, the full
 // captured stdout — may include preceding SET/other statement echoes,
 // which are skipped) into a Plan.
+// ErrNoPlan reports a well-formed EXPLAIN result that contains no plan.
+//
+// PostgreSQL really does print this, and it is not a malformed transcript:
+//
+//	EXPLAIN (ANALYZE) CREATE TABLE IF NOT EXISTS t AS SELECT 1/0;
+//	NOTICE:  relation "t" already exists, skipping
+//	 QUERY PLAN
+//	------------
+//	(0 rows)
+//
+// The IF NOT EXISTS check fires before anything is planned, so the
+// statement is skipped and EXPLAIN has nothing to report -- but it still
+// emits its result-set header, because by then psql is already printing
+// one. Same for CREATE MATERIALIZED VIEW IF NOT EXISTS. Five such blocks
+// are in PostgreSQL's own regression output (matview.out, select_into.out).
+//
+// It is a distinct error rather than a nil plan so that callers can tell
+// it from a parse failure and say something true: "that EXPLAIN produced
+// no plan" is a different message to the user than "that does not look
+// like a query plan", and only one of them means they pasted the wrong
+// thing.
+var ErrNoPlan = errors.New("explain: EXPLAIN produced no plan")
+
 func Parse(out string) (*Plan, error) {
 	lines := extractPlanLines(out)
 	if len(lines) == 0 {
+		// A header and a "(0 rows)" footer with nothing between them is
+		// the empty result above, not a failure to understand the
+		// input. Gated on zero specifically: a header claiming rows we
+		// then failed to collect is a real parse failure and must keep
+		// reporting as one.
+		if strings.Contains(out, "QUERY PLAN") && emptyRowsFooterRE.MatchString(out) {
+			return nil, ErrNoPlan
+		}
 		return nil, fmt.Errorf("explainplan: no plan lines found")
 	}
 

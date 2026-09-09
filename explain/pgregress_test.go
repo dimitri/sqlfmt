@@ -1,6 +1,7 @@
 package explain
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,10 +44,10 @@ func TestPGRegressCorpus(t *testing.T) {
 	}
 
 	var (
-		plans, parsed, failed, nodes int
-		unknownProps                 = map[string]int{}
-		knownProps, compositeProps   int
-		failures                     = map[string]int{}
+		plans, parsed, failed, empty, nodes int
+		unknownProps                        = map[string]int{}
+		knownProps, compositeProps          int
+		failures                            = map[string]int{}
 	)
 
 	for _, f := range files {
@@ -57,6 +58,14 @@ func TestPGRegressCorpus(t *testing.T) {
 		for _, block := range extractPlanBlocks(string(data)) {
 			plans++
 			p, err := Parse(block)
+			// An EXPLAIN that produced no plan is correctly handled,
+			// not a failure to parse. PostgreSQL prints these for
+			// CREATE TABLE/MATERIALIZED VIEW IF NOT EXISTS when the
+			// relation already exists -- see ErrNoPlan.
+			if errors.Is(err, ErrNoPlan) {
+				empty++
+				continue
+			}
 			if err != nil || p == nil || p.Root == nil {
 				failed++
 				if len(failures) < 40 {
@@ -86,7 +95,8 @@ func TestPGRegressCorpus(t *testing.T) {
 		}
 	}
 
-	t.Logf("files=%d plans=%d parsed=%d failed=%d nodes=%d", len(files), plans, parsed, failed, nodes)
+	t.Logf("files=%d plans=%d parsed=%d empty=%d failed=%d nodes=%d",
+		len(files), plans, parsed, empty, failed, nodes)
 	t.Logf("props: known=%d composite=%d unknown=%d (%.1f%% known)",
 		knownProps, compositeProps, sumCounts(unknownProps),
 		100*float64(knownProps)/float64(knownProps+sumCounts(unknownProps)))
@@ -102,26 +112,34 @@ func TestPGRegressCorpus(t *testing.T) {
 		t.Fatal("parsed nothing at all")
 	}
 
-	// Floors, not exact numbers. The corpus grows with every Postgres
-	// release and its contents differ per branch, so asserting a count
-	// would fail on the next minor and teach everyone to update it
-	// without reading it. A ratio does not move for that reason -- it
-	// moves when the parser regresses, which is the thing worth
-	// failing on.
+	// Every plan, with nothing excused. The five blocks that used to
+	// fail here were EXPLAIN output containing no plan at all, which is
+	// a thing PostgreSQL prints and this package now says so about
+	// (ErrNoPlan) rather than failing on -- so there is no longer any
+	// input in the corpus that is merely tolerated, and the bar is the
+	// honest one.
 	//
-	// Set just under what the branches this targets currently reach
-	// (PG18: 2620/2625 parsed, 98.4% of properties known), so the gap
-	// is real breakage rather than the ordinary drift of a corpus that
-	// gains a plan shape or an unrecognised property each release.
-	// Raise them when a release settles higher; that is the ratchet.
-	const (
-		minParseRate  = 0.99
-		minKnownProps = 0.95
-	)
-	if rate := float64(parsed) / float64(plans); rate < minParseRate {
-		t.Errorf("parsed %d/%d plans (%.1f%%), below the %.0f%% floor",
-			parsed, plans, 100*rate, 100*minParseRate)
+	// Not a tolerance, deliberately. A percentage floor invites the next
+	// unparsed shape to be absorbed silently as long as it stays under
+	// the threshold, and the whole value of this corpus is that it
+	// contains shapes nobody here would think to write. If a future
+	// release adds one, that should be a failing test naming it, not a
+	// number quietly drifting down.
+	if failed > 0 {
+		t.Errorf("failed to parse %d of %d plans; see the PARSE-FAIL lines above", failed, plans)
 	}
+	if parsed+empty != plans {
+		t.Errorf("accounted for %d plans, saw %d", parsed+empty, plans)
+	}
+
+	// Properties keep a floor rather than a zero: an unrecognised
+	// property is a plan this package still parses and still renders,
+	// with one line it passes through verbatim instead of understanding.
+	// That degrades gracefully, and every release adds a few, so
+	// demanding all of them would fail on Postgres's schedule rather
+	// than on a regression. Raise it as releases settle higher; PG17/18/
+	// master currently reach 98.2/98.4/98.7%.
+	const minKnownProps = 0.95
 	total := knownProps + sumCounts(unknownProps)
 	if rate := float64(knownProps) / float64(total); total > 0 && rate < minKnownProps {
 		t.Errorf("recognised %d/%d properties (%.1f%%), below the %.0f%% floor",
