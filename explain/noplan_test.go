@@ -1,24 +1,19 @@
 package explain
 
 import (
-	"errors"
 	"testing"
 )
 
-// An EXPLAIN that produced no plan is a real thing PostgreSQL prints, and
-// telling it apart from junk is the difference between "that EXPLAIN had
-// nothing to report" and "that is not a query plan" -- only the second of
-// which means the user pasted the wrong thing.
+// An EXPLAIN that ran and planned nothing is a plan whose tree is empty,
+// not a transcript this package failed to read. PostgreSQL prints these:
+// CREATE TABLE / MATERIALIZED VIEW IF NOT EXISTS, when the relation is
+// already there, is skipped before anything is planned, but psql has
+// begun printing a result set and emits the header anyway.
 
-// The two shapes in PostgreSQL's own regression output, verbatim
-// (src/test/regress/expected/select_into.out and matview.out). The IF NOT
-// EXISTS check fires before anything is planned, so the statement is
-// skipped, but psql is already printing a result set by then and emits
-// its header regardless.
-func TestErrNoPlanOnEmptyResult(t *testing.T) {
+func TestEmptyPlanParses(t *testing.T) {
 	for _, tc := range []struct{ name, out string }{
 		{
-			"CREATE TABLE IF NOT EXISTS, relation exists",
+			"as select_into.out records it",
 			" QUERY PLAN \n------------\n(0 rows)\n",
 		},
 		{
@@ -26,7 +21,7 @@ func TestErrNoPlanOnEmptyResult(t *testing.T) {
 			"NOTICE:  relation \"ctas_ine_tbl\" already exists, skipping\n QUERY PLAN \n------------\n(0 rows)\n",
 		},
 		{
-			"box-drawing borders, as psql draws them with unicode line style",
+			"unicode border style",
 			" QUERY PLAN \n════════════\n(0 rows)\n",
 		},
 		{
@@ -36,51 +31,83 @@ func TestErrNoPlanOnEmptyResult(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := Parse(tc.out)
-			if !errors.Is(err, ErrNoPlan) {
-				t.Fatalf("err = %v, want ErrNoPlan", err)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
 			}
-			if p != nil {
-				t.Errorf("got a plan back as well as ErrNoPlan: %+v", p)
+			if p == nil {
+				t.Fatal("no plan returned")
+			}
+			if !p.Empty {
+				t.Error("Empty is false")
+			}
+			if p.Root != nil {
+				t.Errorf("Root is %+v, want nil: nothing was planned", p.Root)
 			}
 		})
 	}
 }
 
-// The distinction has to be narrow, or it becomes a way to swallow real
-// failures: only a result that says it has zero rows is empty on purpose.
+// Every consumer has to keep working on one without a special case --
+// that is the reason this is a plan rather than an error. Each of these
+// already falls out of a nil Root, and each is the truthful output for a
+// query where nothing happened.
+func TestEmptyPlanFlowsThroughConsumers(t *testing.T) {
+	p, err := Parse(" QUERY PLAN \n------------\n(0 rows)\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("ToJSON emits no plan", func(t *testing.T) {
+		b, err := ToJSON(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "[]" {
+			t.Errorf("ToJSON = %s, want []", b)
+		}
+	})
+
+	t.Run("Advice has nothing to say", func(t *testing.T) {
+		if got := Advice(p); len(got) != 0 {
+			t.Errorf("Advice = %v, want none", got)
+		}
+	})
+}
+
+// The distinction has to stay narrow, or it becomes a way to swallow real
+// failures: only a result that says it has zero rows planned nothing.
 //
 // Prose is not in this list, and that is not an oversight. Parse is
 // deliberately permissive about input with no header and no costs --
 // pasted plans arrive with all sorts of surrounding mess -- so a line of
 // prose comes back as one "unknown" node rather than an error at all.
-// That predates ErrNoPlan and is unchanged by it; what matters here is
-// that ErrNoPlan never stands in for a failure.
-func TestNotErrNoPlan(t *testing.T) {
+// That predates this and is unchanged by it.
+func TestNotAnEmptyPlan(t *testing.T) {
 	for _, tc := range []struct{ name, out string }{
 		{"nothing at all", ""},
 		{
 			// A header claiming rows we then failed to collect is a
-			// genuine parse failure and must keep reporting as one --
-			// this is the case ErrNoPlan must not absorb.
+			// genuine parse failure: this is the case Empty must never
+			// stand in for.
 			"header claiming rows, nothing collected",
 			" QUERY PLAN \n------------\n(3 rows)\n",
 		},
 		{"a footer with no header", "(0 rows)\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Parse(tc.out)
+			p, err := Parse(tc.out)
 			if err == nil {
-				t.Fatal("expected an error")
+				t.Fatalf("expected an error, got plan %+v", p)
 			}
-			if errors.Is(err, ErrNoPlan) {
-				t.Errorf("reported ErrNoPlan for input that is not an empty EXPLAIN result: %q", tc.out)
+			if p != nil {
+				t.Errorf("got a plan back alongside the error: %+v", p)
 			}
 		})
 	}
 }
 
-// A plan that does have rows must be unaffected by any of this.
-func TestEmptyDetectionDoesNotTouchRealPlans(t *testing.T) {
+// A plan that does have rows must be untouched by any of this.
+func TestRealPlansAreNotEmpty(t *testing.T) {
 	out := ` QUERY PLAN 
 ------------------------------------------------------------
  Seq Scan on foo  (cost=0.00..1.05 rows=5 width=4)
@@ -90,13 +117,13 @@ func TestEmptyDetectionDoesNotTouchRealPlans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if p == nil || p.Root == nil {
-		t.Fatal("no plan")
+	if p.Empty {
+		t.Error("a plan with a Seq Scan in it reports Empty")
 	}
-	if p.Root.Type != "seq-scan" {
-		t.Errorf("root type is %q, want seq-scan", p.Root.Type)
+	if p.Root == nil || p.Root.Type != "seq-scan" {
+		t.Fatalf("root = %+v, want a seq-scan", p.Root)
 	}
 	if p.Root.Relation != "foo" {
-		t.Errorf("root relation is %q, want foo", p.Root.Relation)
+		t.Errorf("relation = %q, want foo", p.Root.Relation)
 	}
 }

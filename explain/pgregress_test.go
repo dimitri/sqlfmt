@@ -1,7 +1,6 @@
 package explain
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,15 +68,7 @@ func TestPGRegressCorpus(t *testing.T) {
 		for _, block := range extractPlanBlocks(string(data)) {
 			plans++
 			p, err := Parse(block)
-			// An EXPLAIN that produced no plan is correctly handled,
-			// not a failure to parse. PostgreSQL prints these for
-			// CREATE TABLE/MATERIALIZED VIEW IF NOT EXISTS when the
-			// relation already exists -- see ErrNoPlan.
-			if errors.Is(err, ErrNoPlan) {
-				empty++
-				continue
-			}
-			if err != nil || p == nil || p.Root == nil {
+			if err != nil || p == nil {
 				failed++
 				if len(failures) < 40 {
 					failures[firstLine(block)]++
@@ -85,6 +76,13 @@ func TestPGRegressCorpus(t *testing.T) {
 				continue
 			}
 			parsed++
+			// An EXPLAIN that planned nothing is a parsed plan whose
+			// tree is empty -- counted here only so the log says how
+			// many of them the corpus holds. See Plan.Empty.
+			if p.Empty {
+				empty++
+				continue
+			}
 			var walk func(n *Node)
 			walk = func(n *Node) {
 				nodes++
@@ -106,7 +104,7 @@ func TestPGRegressCorpus(t *testing.T) {
 		}
 	}
 
-	t.Logf("files=%d plans=%d parsed=%d empty=%d failed=%d nodes=%d",
+	t.Logf("files=%d plans=%d parsed=%d (%d planned nothing) failed=%d nodes=%d",
 		len(files), plans, parsed, empty, failed, nodes)
 	t.Logf("props: known=%d composite=%d unknown=%d (%.1f%% known)",
 		knownProps, compositeProps, sumCounts(unknownProps),
@@ -124,11 +122,10 @@ func TestPGRegressCorpus(t *testing.T) {
 	}
 
 	// Every plan, with nothing excused. The five blocks that used to
-	// fail here were EXPLAIN output containing no plan at all, which is
-	// a thing PostgreSQL prints and this package now says so about
-	// (ErrNoPlan) rather than failing on -- so there is no longer any
-	// input in the corpus that is merely tolerated, and the bar is the
-	// honest one.
+	// fail here were EXPLAIN output for a query that planned nothing,
+	// which this package now represents rather than rejects (Plan.Empty)
+	// -- so there is no longer any input in the corpus that is merely
+	// tolerated, and the bar is the honest one.
 	//
 	// Not a tolerance, deliberately. A percentage floor invites the next
 	// unparsed shape to be absorbed silently as long as it stays under
@@ -139,8 +136,8 @@ func TestPGRegressCorpus(t *testing.T) {
 	if failed > 0 {
 		t.Errorf("failed to parse %d of %d plans; see the PARSE-FAIL lines above", failed, plans)
 	}
-	if parsed+empty != plans {
-		t.Errorf("accounted for %d plans, saw %d", parsed+empty, plans)
+	if parsed != plans {
+		t.Errorf("parsed %d of %d plans", parsed, plans)
 	}
 
 	// Properties keep a floor rather than a zero: an unrecognised

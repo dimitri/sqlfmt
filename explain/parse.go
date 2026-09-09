@@ -26,7 +26,6 @@
 package explain
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -74,9 +73,34 @@ type Node struct {
 
 // Plan is the Go equivalent of explain-plan-parser.lisp's defstruct plan.
 type Plan struct {
+	// Root is the top plan node, and is nil when Empty is set.
 	Root          *Node
 	PlanningTime  *float64 // ms
 	ExecutionTime *float64 // ms
+
+	// Empty marks an EXPLAIN that ran and planned nothing. The tree is
+	// genuinely empty -- Root is nil -- and that is the answer, not a
+	// failure to read the output:
+	//
+	//	EXPLAIN (ANALYZE) CREATE TABLE IF NOT EXISTS t AS SELECT 1/0;
+	//	NOTICE:  relation "t" already exists, skipping
+	//	 QUERY PLAN
+	//	------------
+	//	(0 rows)
+	//
+	// The IF NOT EXISTS check fires before anything is planned, so the
+	// statement is skipped -- but psql is already printing a result set
+	// and emits its header regardless. Same for CREATE MATERIALIZED
+	// VIEW IF NOT EXISTS. Five such blocks are in PostgreSQL's own
+	// regression output (matview.out, select_into.out).
+	//
+	// Modelled here rather than returned as an error so that every
+	// caller keeps working on it without a special case: a renderer
+	// draws the query with nothing under it, ToJSON emits no plan,
+	// Advice has nothing to say. Each of those is the truthful output
+	// for a query where nothing happened, and each already falls out of
+	// a nil Root.
+	Empty bool
 
 	// GeneratedAdvice and SuppliedAdvice are the plan-advice blocks
 	// contrib/pg_plan_advice prints after the tree:
@@ -173,39 +197,18 @@ func parseAdviceItem(line string) (AdviceItem, bool) {
 // Parse parses psql's default TEXT-format EXPLAIN output (out, the full
 // captured stdout — may include preceding SET/other statement echoes,
 // which are skipped) into a Plan.
-// ErrNoPlan reports a well-formed EXPLAIN result that contains no plan.
-//
-// PostgreSQL really does print this, and it is not a malformed transcript:
-//
-//	EXPLAIN (ANALYZE) CREATE TABLE IF NOT EXISTS t AS SELECT 1/0;
-//	NOTICE:  relation "t" already exists, skipping
-//	 QUERY PLAN
-//	------------
-//	(0 rows)
-//
-// The IF NOT EXISTS check fires before anything is planned, so the
-// statement is skipped and EXPLAIN has nothing to report -- but it still
-// emits its result-set header, because by then psql is already printing
-// one. Same for CREATE MATERIALIZED VIEW IF NOT EXISTS. Five such blocks
-// are in PostgreSQL's own regression output (matview.out, select_into.out).
-//
-// It is a distinct error rather than a nil plan so that callers can tell
-// it from a parse failure and say something true: "that EXPLAIN produced
-// no plan" is a different message to the user than "that does not look
-// like a query plan", and only one of them means they pasted the wrong
-// thing.
-var ErrNoPlan = errors.New("explain: EXPLAIN produced no plan")
-
 func Parse(out string) (*Plan, error) {
 	lines := extractPlanLines(out)
 	if len(lines) == 0 {
 		// A header and a "(0 rows)" footer with nothing between them is
-		// the empty result above, not a failure to understand the
-		// input. Gated on zero specifically: a header claiming rows we
-		// then failed to collect is a real parse failure and must keep
-		// reporting as one.
+		// an EXPLAIN that ran and planned nothing -- a real plan, whose
+		// tree happens to be empty. See Plan.Empty.
+		//
+		// Gated on zero rows specifically: a header claiming rows we
+		// then failed to collect is a genuine parse failure and must
+		// keep reporting as one.
 		if strings.Contains(out, "QUERY PLAN") && emptyRowsFooterRE.MatchString(out) {
-			return nil, ErrNoPlan
+			return &Plan{Empty: true}, nil
 		}
 		return nil, fmt.Errorf("explainplan: no plan lines found")
 	}
