@@ -82,6 +82,7 @@ var nodeTypeTokens = []struct {
 	{"Limit", "limit"},
 	{"Lock Rows", "lock-rows"},
 	{"LockRows", "lock-rows"},
+	{"HashSetOp", "set-op"},
 	{"Set Op", "set-op"},
 	{"SetOp", "set-op"},
 	{"Result", "result"},
@@ -156,6 +157,10 @@ func matchNodeType(text string) (typ, prefix, label, remainder string) {
 		return jt, "", jl, jr
 	}
 
+	if sl, sr, ok := matchSetOpVariant(text); ok {
+		return "set-op", "", sl, sr
+	}
+
 	for _, tok := range nodeTypeTokens {
 		if strings.HasPrefix(text, tok.token) {
 			after := text[len(tok.token):]
@@ -223,4 +228,46 @@ func matchJoinVariant(text string) (typ, label, remainder string, ok bool) {
 		}
 	}
 	return "", "", "", false
+}
+
+// setOpCommands are the four set operations explain.c appends to a SetOp
+// node's name, as `appendStringInfo(es->str, " %s", setopcmd)` -- and
+// reports separately in every other format as
+// ExplainPropertyText("Command", setopcmd). Longest first: "Except All"
+// has to win over "Except".
+var setOpCommands = []string{"Intersect All", "Except All", "Intersect", "Except"}
+
+// matchSetOpVariant recognizes "SetOp Except All" / "HashSetOp Intersect"
+// and keeps the whole thing as the display label, the same way
+// matchJoinVariant keeps "Hash Anti Join".
+//
+// Both halves carry information the bare type does not. The strategy is
+// in the name itself (explain.c picks pname "HashSetOp" for SETOP_HASHED
+// and "SetOp" for SETOP_SORTED), and the command says which set
+// operation this is. Collapsing all four commands and both strategies to
+// the single label "Set Op" lost all of it -- visibly: a course diagram
+// rendered a hashed EXCEPT as a node labelled "Set Op", with no way to
+// tell it from an INTERSECT.
+func matchSetOpVariant(text string) (label, remainder string, ok bool) {
+	for _, base := range []string{"HashSetOp", "SetOp"} {
+		if !strings.HasPrefix(text, base) {
+			continue
+		}
+		rest := text[len(base):]
+		if rest != "" && !isWordBoundary(rest[0]) {
+			continue
+		}
+		rest = strings.TrimLeft(rest, " ")
+		for _, cmd := range setOpCommands {
+			if strings.HasPrefix(rest, cmd) {
+				after := rest[len(cmd):]
+				if after == "" || isWordBoundary(after[0]) {
+					return base + " " + cmd, strings.TrimSpace(after), true
+				}
+			}
+		}
+		// A SetOp with no command spelled out is still a SetOp.
+		return base, strings.TrimSpace(rest), true
+	}
+	return "", "", false
 }

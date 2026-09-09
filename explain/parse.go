@@ -48,15 +48,90 @@ type Node struct {
 	RowsActual   *int64 // nil when ANALYZE wasn't used
 	TimeActual   *float64
 	Loops        *int64
-	Props        []string // raw, trimmed property lines, document order
-	Children     []*Node
+	// Props are the node's indented property lines in document order.
+	// Each carries its raw text plus, where recognised, the JSON-format
+	// keys and values EXPLAIN (FORMAT JSON) would have reported for the
+	// same line -- see props.go. Prop.Raw is always the exact captured
+	// line, so a renderer that prints properties verbatim is unaffected
+	// by how much of a line this package understood.
+	Props []Prop
+	// SubplanName is the name of the subtree this node roots, when it is
+	// one: "CTE x", "InitPlan 1 (returns $0)", "SubPlan 2".
+	//
+	// In TEXT this arrives as a bare line above the node's own "->" line,
+	// which used to read as a property of the PARENT -- and was the
+	// single largest class of unrecognised property line in PostgreSQL's
+	// own regression corpus. It is not a property at all: explain.c
+	// prints the same plan_name string here as
+	// appendStringInfo("%s\n", plan_name) and in every other format as
+	// ExplainPropertyText("Subplan Name", plan_name) on this node.
+	// Modelling it as a field puts the TEXT and JSON readings back on
+	// the same footing.
+	SubplanName string
+	Children    []*Node
 }
 
 // Plan is the Go equivalent of explain-plan-parser.lisp's defstruct plan.
 type Plan struct {
+	// Root is the top plan node, and is nil when Empty is set.
 	Root          *Node
 	PlanningTime  *float64 // ms
 	ExecutionTime *float64 // ms
+
+	// Empty marks an EXPLAIN that ran and planned nothing. The tree is
+	// genuinely empty -- Root is nil -- and that is the answer, not a
+	// failure to read the output:
+	//
+	//	EXPLAIN (ANALYZE) CREATE TABLE IF NOT EXISTS t AS SELECT 1/0;
+	//	NOTICE:  relation "t" already exists, skipping
+	//	 QUERY PLAN
+	//	------------
+	//	(0 rows)
+	//
+	// The IF NOT EXISTS check fires before anything is planned, so the
+	// statement is skipped -- but psql is already printing a result set
+	// and emits its header regardless. Same for CREATE MATERIALIZED
+	// VIEW IF NOT EXISTS. Five such blocks are in PostgreSQL's own
+	// regression output (matview.out, select_into.out).
+	//
+	// Modelled here rather than returned as an error so that every
+	// caller keeps working on it without a special case: a renderer
+	// draws the query with nothing under it, ToJSON emits no plan,
+	// Advice has nothing to say. Each of those is the truthful output
+	// for a query where nothing happened, and each already falls out of
+	// a nil Root.
+	Empty bool
+
+	// GeneratedAdvice and SuppliedAdvice are the plan-advice blocks
+	// contrib/pg_plan_advice prints after the tree:
+	//
+	//	 Generated Plan Advice:
+	//	   JOIN_ORDER(results races drivers)
+	//	   SEQ_SCAN(alt_t1 alt_t2@exists_to_any_1)
+	//
+	// They decorate the whole plan rather than any node in it, so they
+	// hang off Plan as a sibling of Root rather than being forced into
+	// the tree. Before this they were collected as property lines of
+	// whatever node happened to be on the stack when the block started,
+	// which put "NO_GATHER(...)" on a Seq Scan -- and made them the
+	// largest remaining class of unrecognised property.
+	//
+	// Supplied advice is what the caller asked for and can carry a
+	// per-item annotation ("/* matched */"); generated advice is what
+	// the planner would emit to reproduce the plan it chose.
+	GeneratedAdvice []AdviceItem
+	SuppliedAdvice  []AdviceItem
+}
+
+// AdviceItem is one line of a plan-advice block.
+type AdviceItem struct {
+	AdviceLine
+	// Raw is the line as printed, annotation included.
+	Raw string
+	// Annotation is the text of a trailing /* ... */ comment, without
+	// the delimiters -- "matched" on supplied advice the planner was
+	// able to honour. Empty when there is none.
+	Annotation string
 }
 
 // HasPlan reports whether text looks like it contains a captured EXPLAIN
@@ -77,12 +152,64 @@ var arrowRE = regexp.MustCompile(`^(\s*)->\s+`)
 var separatorRE = regexp.MustCompile(`^\s*[═=─-]{5,}\s*$`)
 var rowsFooterRE = regexp.MustCompile(`^\(\d+ rows?\)`)
 
+// emptyRowsFooterRE is the footer of a result set with nothing in it.
+var emptyRowsFooterRE = regexp.MustCompile(`(?m)^\s*\(0 rows\)\s*$`)
+
+// subplanHeaderRE matches the bare name line EXPLAIN prints above a
+// subplan's own node line. explain.c builds exactly these three shapes,
+// as psprintf("CTE %s"), psprintf("InitPlan %s") and
+// psprintf("SubPlan %s").
+var subplanHeaderRE = regexp.MustCompile(`^(CTE|InitPlan|SubPlan) `)
+
+// adviceAnnotationRE matches the trailing "/* matched */" pg_plan_advice
+// puts on a supplied advice item it was able to honour.
+var adviceAnnotationRE = regexp.MustCompile(`\s*/\*\s*(.*?)\s*\*/\s*$`)
+
+// unbalancedParens reports whether s has more "(" than ")", meaning an
+// advice item is still incomplete.
+func unbalancedParens(s string) bool {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+	}
+	return depth > 0
+}
+
+// parseAdviceItem parses one line of a plan-advice block.
+func parseAdviceItem(line string) (AdviceItem, bool) {
+	body, annotation := line, ""
+	if m := adviceAnnotationRE.FindStringSubmatch(line); m != nil {
+		annotation = m[1]
+		body = strings.TrimSpace(adviceAnnotationRE.ReplaceAllString(line, ""))
+	}
+	parsed, ok := ParseAdviceLine(body)
+	if !ok {
+		return AdviceItem{}, false
+	}
+	return AdviceItem{AdviceLine: parsed, Raw: line, Annotation: annotation}, true
+}
+
 // Parse parses psql's default TEXT-format EXPLAIN output (out, the full
 // captured stdout — may include preceding SET/other statement echoes,
 // which are skipped) into a Plan.
 func Parse(out string) (*Plan, error) {
 	lines := extractPlanLines(out)
 	if len(lines) == 0 {
+		// A header and a "(0 rows)" footer with nothing between them is
+		// an EXPLAIN that ran and planned nothing -- a real plan, whose
+		// tree happens to be empty. See Plan.Empty.
+		//
+		// Gated on zero rows specifically: a header claiming rows we
+		// then failed to collect is a genuine parse failure and must
+		// keep reporting as one.
+		if strings.Contains(out, "QUERY PLAN") && emptyRowsFooterRE.MatchString(out) {
+			return &Plan{Empty: true}, nil
+		}
 		return nil, fmt.Errorf("explainplan: no plan lines found")
 	}
 
@@ -92,6 +219,16 @@ func Parse(out string) (*Plan, error) {
 		node  *Node
 	}
 	var stack []frame
+
+	// A subplan header names the node on the NEXT "->" line, so it is
+	// held here until that node is built.
+	var pendingSubplanName string
+
+	// Set while reading a plan-advice block; points at the slice its
+	// items belong to. adviceBuf accumulates an item psql wrapped over
+	// several output lines.
+	var adviceTarget *[]AdviceItem
+	var adviceBuf string
 
 	for _, line := range lines {
 		if m := planningTimeRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
@@ -124,6 +261,10 @@ func Parse(out string) (*Plan, error) {
 				parent := stack[len(stack)-1].node
 				parent.Children = append(parent.Children, node)
 			}
+			if pendingSubplanName != "" {
+				node.SubplanName = pendingSubplanName
+				pendingSubplanName = ""
+			}
 			stack = append(stack, frame{depth: depth, node: node})
 			continue
 		}
@@ -140,8 +281,47 @@ func Parse(out string) (*Plan, error) {
 			continue
 		}
 
+		switch trimmed {
+		case "Generated Plan Advice:":
+			adviceTarget = &plan.GeneratedAdvice
+			continue
+		case "Supplied Plan Advice:":
+			adviceTarget = &plan.SuppliedAdvice
+			continue
+		}
+		if adviceTarget != nil {
+			// An advice item can be wider than psql's output column and
+			// arrive split across lines, so accumulate until the
+			// parentheses balance rather than judging each line alone.
+			// A long INDEX_SCAN over a partitioned table routinely wraps
+			// three ways.
+			if adviceBuf == "" {
+				adviceBuf = trimmed
+			} else {
+				adviceBuf += " " + trimmed
+			}
+			if item, ok := parseAdviceItem(adviceBuf); ok {
+				*adviceTarget = append(*adviceTarget, item)
+				adviceBuf = ""
+				continue
+			}
+			if unbalancedParens(adviceBuf) {
+				continue // more of this item is still to come
+			}
+			// Balanced and still not advice: the block is over. Put the
+			// line back on the ordinary path.
+			adviceTarget = nil
+			trimmed = adviceBuf
+			adviceBuf = ""
+		}
+
+		if subplanHeaderRE.MatchString(trimmed) {
+			pendingSubplanName = trimmed
+			continue
+		}
+
 		if len(stack) > 0 {
-			stack[len(stack)-1].node.Props = append(stack[len(stack)-1].node.Props, trimmed)
+			stack[len(stack)-1].node.Props = append(stack[len(stack)-1].node.Props, ParseProp(trimmed))
 		}
 	}
 
