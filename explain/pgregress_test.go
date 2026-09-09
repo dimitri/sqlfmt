@@ -40,7 +40,18 @@ func TestPGRegressCorpus(t *testing.T) {
 		files = append(files, matches...)
 	}
 	if len(files) == 0 {
-		t.Fatalf("no expected/*.out under %s", root)
+		// The absolute path, not what was passed. `go test ./explain/`
+		// runs with the package directory as its working directory, so
+		// a relative PGREGRESS_DIR resolves somewhere other than where
+		// whoever typed it was standing -- which is exactly how this
+		// first failed in CI, against a checkout that had fetched the
+		// files correctly.
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			abs = root
+		}
+		t.Fatalf("no expected/*.out under %s (PGREGRESS_DIR=%s, resolved from %s)",
+			abs, root, mustGetwd())
 	}
 
 	var (
@@ -231,3 +242,13 @@ func sumCounts(m map[string]int) int {
 }
 
 var _ = fmt.Sprintf
+
+// mustGetwd names the directory a relative PGREGRESS_DIR is resolved
+// against, which is the package directory and not the repository root.
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "?"
+	}
+	return wd
+}

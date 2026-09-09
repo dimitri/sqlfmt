@@ -85,9 +85,12 @@ jobs:
           git checkout
           echo "fetched $(find . -path '*/expected/*.out' | wc -l) files, $(du -sh . | cut -f1)"
 
+      # Absolute, because `go test ./explain/` runs the test binary with
+      # the package directory as its working directory -- a relative
+      # "pgsrc" resolves to explain/pgsrc and finds nothing.
       - name: parse every plan in it
         env:
-          PGREGRESS_DIR: pgsrc
+          PGREGRESS_DIR: ${{ github.workspace }}/pgsrc
         run: go test ./explain/ -run TestPGRegress -v
 
   # ── Build + smoke-test the browser WebAssembly module ──────────────────────
