@@ -294,8 +294,8 @@ func TestOnConflictDoSelectStaysInline(t *testing.T) {
 // and DO SELECT's optional FOR UPDATE reaches the same code.
 func TestRowLockingClauseIsNotAnUpdateClause(t *testing.T) {
 	for _, c := range []struct{ src, want string }{
-		{"select a, b from t where a = 1 for update;\n", " where a = 1 for update;"},
-		{"select a, b from t where a = 1 for no key update;\n", " where a = 1 for no key update;"},
+		{"select a, b from t where a = 1 for update;\n", "   for update;"},
+		{"select a, b from t where a = 1 for no key update;\n", "   for no key update;"},
 		{"insert into t (a) values (1) on conflict (a) do select for update returning a;\n", "do select for update"},
 	} {
 		got := mustFormat(t, c.src)
