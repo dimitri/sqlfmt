@@ -217,9 +217,40 @@ func isRowLockTail(toks []Token, i int) bool {
 	return word(i-1, "key") && word(i-2, "no") && kw(i-3, "for")
 }
 
+// isRowLockStart reports whether the "for" at toks[i] opens a row-level
+// locking clause: FOR UPDATE, FOR NO KEY UPDATE, FOR SHARE or FOR KEY
+// SHARE. Matched on text for everything after the "for": "no", "key" and
+// "share" are not in the keyword table, so their kind says nothing.
+//
+// The "for" alone is not enough. It also opens FOR EACH ROW, FOR VALUES,
+// FOR PORTION OF, a cursor's FOR SELECT, a policy's FOR UPDATE and a PL/pgSQL
+// FOR loop, and none of those is a locking clause; the strength word after
+// it is what says which one this is.
+func isRowLockStart(toks []Token, i int) bool {
+	if i+1 >= len(toks) || toks[i].Kind != TokKeyword || toks[i].Lower != "for" {
+		return false
+	}
+	word := func(n int, w string) bool { return n < len(toks) && toks[n].Lower == w }
+	switch {
+	case word(i+1, "update"), word(i+1, "share"):
+		return true
+	case word(i+1, "no"):
+		return word(i+2, "key") && word(i+3, "update")
+	case word(i+1, "key"):
+		return word(i+2, "share")
+	}
+	return false
+}
+
 func splitClauses(toks []Token) []clauseSeg {
 	var segs []clauseSeg
 	depth := 0
+	// inDoSelect is set from an ON CONFLICT "do select" until the next
+	// clause bound. DO SELECT takes its own optional FOR UPDATE, which
+	// belongs to the conflict action and has to stay attached to it.
+	inDoSelect := false
+	// sawSelect: a locking clause needs a select clause to lock.
+	sawSelect := false
 	type bound struct {
 		idx   int
 		name  string
@@ -256,6 +287,7 @@ func splitClauses(toks []Token) []clauseSeg {
 		// clause with a body to lay out.
 		if t.Lower == "select" && i > 0 && toks[i-1].Kind == TokKeyword &&
 			toks[i-1].Lower == "do" {
+			inDoSelect = true
 			continue
 		}
 		// The UPDATE in a row-locking clause -- FOR UPDATE, FOR NO KEY
@@ -271,12 +303,37 @@ func splitClauses(toks []Token) []clauseSeg {
 		if t.Lower == "update" && isRowLockTail(toks, i) {
 			continue
 		}
+		// A SELECT's own locking clause is a clause like ORDER BY or LIMIT,
+		// and without a bound of its own it ran on at the end of whatever
+		// came before:
+		//
+		//	   and valid_period && daterange(...) for update;
+		//	^ was: reads as though FOR UPDATE belonged to the AND
+		//
+		// It is named "for", not "for update": the river is as wide as its
+		// longest clause keyword, and "for no key update" would push every
+		// other clause 9 columns to the right. The strength and the OF /
+		// NOWAIT / SKIP LOCKED words are the clause's body, so it lays out as
+		//
+		//	   limit 1
+		//	     for update skip locked;
+		//
+		// Only where there is a select clause for it to lock, and never
+		// inside DO SELECT, whose FOR UPDATE is part of the conflict action.
+		if isRowLockStart(toks, i) && !inDoSelect && sawSelect {
+			bounds = append(bounds, bound{idx: i, name: "for", kwEnd: i + 1})
+			continue
+		}
 		for _, cw := range clauseWords {
 			if cw.leadingOnly && i != 0 {
 				continue
 			}
 			if matchWords(toks, i, cw.words) {
 				bounds = append(bounds, bound{idx: i, name: cw.name, kwEnd: i + len(cw.words)})
+				inDoSelect = false
+				if cw.name == "select" {
+					sawSelect = true
+				}
 				break
 			}
 		}
