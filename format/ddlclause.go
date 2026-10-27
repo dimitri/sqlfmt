@@ -38,6 +38,15 @@ var (
 		{"lc_collate"}, {"lc_ctype"}, {"tablespace"}, {"allow_connections"},
 		{"connection", "limit"}, {"is_template"}, {"oid"},
 	}
+	// CREATE POLICY name ON table [AS ...] [FOR cmd] [TO roles] [USING (...)]
+	// [WITH CHECK (...)], and CREATE RULE name AS ON event TO table [WHERE
+	// cond] DO [INSTEAD] action: one clause per line under the header.
+	policyClauses = []clauseStarter{
+		{"on"}, {"as"}, {"for"}, {"to"}, {"using"}, {"with", "check"},
+	}
+	ruleClauses = []clauseStarter{
+		{"on"}, {"to"}, {"where"}, {"do"},
+	}
 	grantClauses = []clauseStarter{
 		{"on"}, {"to"}, {"from"}, {"with", "grant", "option"}, {"granted", "by"},
 	}

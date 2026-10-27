@@ -77,6 +77,10 @@ var keywords = buildKeywordSet([]string{
 	// see them: FETCH FIRST n ROWS and NATURAL JOIN in a query, and the
 	// COPY and DECLARE ... CURSOR statements that carry one.
 	"fetch", "natural", "copy", "declare", "cursor",
+	// Maintenance commands, so "vacuum (verbose, analyze) t" keeps the space
+	// before its option list instead of reading as a function call.
+	"vacuum", "analyze", "reindex",
+	"policy", "rule",
 	// DDL words, so rule 1 lowercases them consistently: without these a
 	// CREATE TRIGGER came out as "create TRIGGER ... for EACH row", with
 	// the words in the keyword table lowercased and the rest left as

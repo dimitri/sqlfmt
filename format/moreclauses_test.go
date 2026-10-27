@@ -120,3 +120,28 @@ func TestCTESearchCycleWraps(t *testing.T) {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// CREATE POLICY and CREATE RULE put each clause on a line of its own under
+// the header, as GRANT and CREATE DATABASE do; they were one 150-column line.
+// VACUUM keeps the space before its option list.
+func TestPolicyRuleVacuumLayout(t *testing.T) {
+	cases := []struct{ name, src, want string }{
+		{"policy",
+			"create policy p on some_long_table_name_here for select to public using (owner = current_user and visible) with check (owner = current_user);\n",
+			"create policy p\n  on some_long_table_name_here\n  for select\n  to public\n  using (owner = current_user and visible)\n  with check (owner = current_user);\n"},
+		{"short policy", "create policy p on t using (true);\n", "create policy p on t using (true);\n"},
+		{"rule",
+			"create rule r as on insert to some_long_table_name_here where new.a > 1 do instead insert into other_table values (new.a);\n",
+			"create rule r as\n  on insert\n  to some_long_table_name_here\n  where new.a > 1\n  do instead insert into other_table values (new.a);\n"},
+		{"vacuum", "vacuum (verbose, analyze) t;\n", "vacuum (verbose, analyze) t;\n"},
+	}
+	for _, c := range cases {
+		got := formatOK(t, c.src)
+		if got != c.want {
+			t.Errorf("%s:\ngot:\n%s\nwant:\n%s", c.name, got, c.want)
+		}
+		if again := formatOK(t, got); again != got {
+			t.Errorf("%s: not idempotent:\n%s", c.name, again)
+		}
+	}
+}

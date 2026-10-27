@@ -105,7 +105,8 @@ func statementKeyword(toks []Token) string {
 				}
 				continue
 			case "table", "index", "function", "view", "trigger", "statistics",
-				"sequence", "procedure", "materialized", "database":
+				"sequence", "procedure", "materialized", "database",
+				"policy", "rule":
 				kind := toks[i].Lower
 				if kind == "materialized" {
 					// "create materialized view" lays out as a view.
@@ -185,6 +186,23 @@ func formatStatement(toks []Token) string {
 		lines = layoutPrepare(body)
 	case "grant", "revoke":
 		if l, ok := layoutIndentedClauses(body, grantClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
+	case "create policy":
+		if l, ok := layoutIndentedClauses(body, policyClauses, 2); ok {
+			// USING (expr) is a predicate, not JOIN ... USING(cols): spaceBetween
+			// closes the paren up on any "using".
+			for i := range l {
+				l[i] = strings.Replace(l[i], " using(", " using (", 1)
+			}
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
+	case "create rule":
+		if l, ok := layoutIndentedClauses(body, ruleClauses, 2); ok {
 			lines = l
 		} else {
 			lines = flatStatementLines(body)
