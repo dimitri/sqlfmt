@@ -6,5 +6,6 @@
          lead(code, 1) over w as "next"
     from results
     join drivers using(driverid)
-   where raceid = 890 window w as (order by position)
+   where raceid = 890
+  window w as (order by position)
 order by position;
