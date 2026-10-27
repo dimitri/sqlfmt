@@ -32,6 +32,9 @@ var clauseWords = []struct {
 	{[]string{"from"}, "from", false},
 	{[]string{"where"}, "where", false},
 	{[]string{"having"}, "having", false},
+	// WINDOW name AS (spec), ...: a comma list between HAVING and ORDER BY.
+	// Without a bound it ran on at the end of the FROM clause.
+	{[]string{"window"}, "window", false},
 	{[]string{"update"}, "update", false},
 	{[]string{"set"}, "set", false},
 	{[]string{"delete"}, "delete", false},
@@ -1881,7 +1884,7 @@ func renderClause(s clauseSeg, baseIndent, width int) []string {
 		} else {
 			bodyLines = layoutCommaList(body, bodyCol)
 		}
-	case "select", "group by", "order by", "returning":
+	case "select", "group by", "order by", "returning", "window":
 		bodyLines = layoutCommaList(body, bodyCol)
 	case "where":
 		bodyLines = layoutPredicateList(body, baseIndent+width)
