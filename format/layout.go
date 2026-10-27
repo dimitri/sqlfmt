@@ -29,6 +29,9 @@ var clauseWords = []struct {
 	{[]string{"group", "by"}, "group by", false},
 	{[]string{"order", "by"}, "order by", false},
 	{[]string{"select"}, "select", false},
+	// SELECT ... INTO newtable. After "insert into", whose own match skips
+	// past its INTO (see splitClauses).
+	{[]string{"into"}, "into", false},
 	{[]string{"from"}, "from", false},
 	{[]string{"where"}, "where", false},
 	{[]string{"having"}, "having", false},
@@ -42,6 +45,8 @@ var clauseWords = []struct {
 	{[]string{"values"}, "values", false},
 	{[]string{"limit"}, "limit", false},
 	{[]string{"offset"}, "offset", false},
+	// FETCH FIRST n ROWS ONLY / WITH TIES, the standard spelling of LIMIT.
+	{[]string{"fetch"}, "fetch", false},
 }
 
 type clauseSeg struct {
@@ -245,6 +250,22 @@ func isRowLockStart(toks []Token, i int) bool {
 	return false
 }
 
+// isQueryTrailer reports whether the "with" at toks[i] opens WITH CHECK
+// OPTION, WITH LOCAL / CASCADED CHECK OPTION or WITH [NO] DATA. Matched on
+// text: "no", "data", "local" and "cascaded" are not in the keyword table.
+func isQueryTrailer(toks []Token, i int) bool {
+	word := func(n int, w string) bool { return n < len(toks) && toks[n].Lower == w }
+	switch {
+	case word(i+1, "check"), word(i+1, "data"):
+		return true
+	case word(i+1, "no"):
+		return word(i+2, "data")
+	case word(i+1, "local"), word(i+1, "cascaded"):
+		return word(i+2, "check")
+	}
+	return false
+}
+
 func splitClauses(toks []Token) []clauseSeg {
 	var segs []clauseSeg
 	depth := 0
@@ -254,6 +275,9 @@ func splitClauses(toks []Token) []clauseSeg {
 	inDoSelect := false
 	// sawSelect: a locking clause needs a select clause to lock.
 	sawSelect := false
+	// sawDelete / sawUsing: the first top-level USING of a DELETE is its
+	// clause for the extra relations; any later one belongs to a JOIN.
+	sawDelete, sawUsing := false, false
 	type bound struct {
 		idx   int
 		name  string
@@ -327,6 +351,25 @@ func splitClauses(toks []Token) []clauseSeg {
 			bounds = append(bounds, bound{idx: i, name: "for", kwEnd: i + 1})
 			continue
 		}
+		// DELETE ... USING other_table, a clause of its own. It ran on at the
+		// end of the FROM line otherwise.
+		// ROWS FROM (f(), g()): the FROM belongs to the ROWS, it does not
+		// start the FROM clause.
+		if t.Lower == "from" && i > 0 && toks[i-1].Kind == TokKeyword && toks[i-1].Lower == "rows" {
+			continue
+		}
+		if sawDelete && !sawUsing && t.Lower == "using" {
+			sawUsing = true
+			bounds = append(bounds, bound{idx: i, name: "using", kwEnd: i + 1})
+			continue
+		}
+		// WITH CHECK OPTION (CREATE VIEW) and WITH [NO] DATA (CREATE TABLE
+		// AS, CREATE MATERIALIZED VIEW) close a query, and ran on at the end
+		// of its last predicate, where they read as part of it.
+		if sawSelect && t.Lower == "with" && isQueryTrailer(toks, i) {
+			bounds = append(bounds, bound{idx: i, name: "with", kwEnd: i + 1})
+			continue
+		}
 		for _, cw := range clauseWords {
 			if cw.leadingOnly && i != 0 {
 				continue
@@ -337,6 +380,12 @@ func splitClauses(toks []Token) []clauseSeg {
 				if cw.name == "select" {
 					sawSelect = true
 				}
+				if cw.name == "delete" {
+					sawDelete = true
+				}
+				// Past the clause's own words: the INTO of "insert into"
+				// must not be taken for SELECT's INTO clause.
+				i += len(cw.words) - 1
 				break
 			}
 		}
@@ -365,7 +414,7 @@ func matchWords(toks []Token, i int, words []string) bool {
 
 func isJoinModifier(lower string) bool {
 	switch lower {
-	case "left", "right", "full", "inner", "outer", "cross":
+	case "left", "right", "full", "inner", "outer", "cross", "natural":
 		return true
 	}
 	return false
@@ -485,6 +534,11 @@ func splitJoinSegments(toks []Token) [][]Token {
 			continue
 		}
 		if isJoinModifier(t.Lower) {
+			// "left outer join", "natural left join": one phrase, split
+			// once, at its first word.
+			if i > 0 && toks[i-1].Kind == TokKeyword && isJoinModifier(toks[i-1].Lower) {
+				continue
+			}
 			segs = append(segs, toks[start:i])
 			start = i
 			continue
@@ -2202,14 +2256,36 @@ func renderCTE(cte []Token, baseIndent int, more bool, withPrefix string) []stri
 	lines = append(lines, strings.Repeat(" ", baseIndent)+name+asText)
 	lines = append(lines, bodyLines...)
 	closing := strings.Repeat(" ", baseIndent) + ")"
+	// SEARCH and CYCLE trail the closing paren. Together they run well past
+	// the line, so CYCLE starts a line of its own when the pair does not fit.
+	var cycleLine string
 	if tail := trimTokens(cte[close+1:]); len(tail) > 0 {
-		closing += " " + plainJoin(tail)
+		search, cycle := tail, []Token(nil)
+		for k := 1; k < len(tail); k++ {
+			if tail[k].Lower == "cycle" {
+				search, cycle = tail[:k], tail[k:]
+				break
+			}
+		}
+		closing += " " + plainJoin(search)
+		if len(cycle) > 0 {
+			if cols(closing)+1+cols(plainJoin(cycle))+1 <= targetWidth {
+				closing += " " + plainJoin(cycle)
+			} else {
+				cycleLine = strings.Repeat(" ", baseIndent+2) + plainJoin(cycle)
+			}
+		}
+	}
+	last := &closing
+	if cycleLine != "" {
+		lines = append(lines, closing)
+		last = &cycleLine
 	}
 	if more {
-		closing += ","
+		*last += ","
 	}
-	closing += trailingCommentSuffix(cte)
-	lines = append(lines, closing)
+	*last += trailingCommentSuffix(cte)
+	lines = append(lines, *last)
 	return lines
 }
 
