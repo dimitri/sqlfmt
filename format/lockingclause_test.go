@@ -81,7 +81,7 @@ func TestLockingClauseLeavesOtherForsAlone(t *testing.T) {
 			"create trigger trg before update on t for each row execute function f();\n"},
 		{"policy command",
 			"create policy p on t for update using (owner = current_user);\n",
-			"create policy p on t for update using(owner = current_user);\n"},
+			"create policy p on t for update using (owner = current_user);\n"},
 		{"partition bound",
 			"create table t1 partition of t for values from (1) to (2);\n",
 			"create table t1 partition of t for values from (1) to (2);\n"},

@@ -105,7 +105,8 @@ func statementKeyword(toks []Token) string {
 				}
 				continue
 			case "table", "index", "function", "view", "trigger", "statistics",
-				"sequence", "procedure", "materialized", "database":
+				"sequence", "procedure", "materialized", "database",
+				"policy", "rule":
 				kind := toks[i].Lower
 				if kind == "materialized" {
 					// "create materialized view" lays out as a view.
@@ -189,6 +190,23 @@ func formatStatement(toks []Token) string {
 		} else {
 			lines = flatStatementLines(body)
 		}
+	case "create policy":
+		if l, ok := layoutIndentedClauses(body, policyClauses, 2); ok {
+			// USING (expr) is a predicate, not JOIN ... USING(cols): spaceBetween
+			// closes the paren up on any "using".
+			for i := range l {
+				l[i] = strings.Replace(l[i], " using(", " using (", 1)
+			}
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
+	case "create rule":
+		if l, ok := layoutIndentedClauses(body, ruleClauses, 2); ok {
+			lines = l
+		} else {
+			lines = flatStatementLines(body)
+		}
 	case "create database":
 		if l, ok := layoutIndentedClauses(body, databaseClauses, 2); ok {
 			lines = l
@@ -201,6 +219,10 @@ func formatStatement(toks []Token) string {
 		lines = layoutExplain(body)
 	case "merge":
 		lines = layoutMerge(body)
+	case "copy":
+		lines = layoutCopy(body)
+	case "declare":
+		lines = layoutDeclare(body)
 	case "":
 		// A statement that opens with "(" -- the parenthesized arms of a
 		// set operation -- is still a query, and formatQuerySegment knows
@@ -258,6 +280,55 @@ func layoutPrepare(toks []Token) []string {
 		}
 		head := flatJoin(toks[:i+1])
 		return append([]string{head}, formatQuerySegment(rest, 1)...)
+	}
+	return flatStatementLines(toks)
+}
+
+// layoutDeclare puts a DECLARE ... CURSOR header on its own line and hands
+// the query it declares to the query layout, the way layoutPrepare does:
+//
+//	declare c cursor for
+//	   select ...
+//	     from ...
+func layoutDeclare(toks []Token) []string {
+	depth := 0
+	for i, t := range toks {
+		switch t.Text {
+		case "(":
+			depth++
+			continue
+		case ")":
+			depth--
+			continue
+		}
+		if depth != 0 || t.Kind != TokKeyword || t.Lower != "for" {
+			continue
+		}
+		rest := trimTokens(toks[i+1:])
+		if !isQueryStart(rest) {
+			break
+		}
+		head := flatJoin(toks[:i+1])
+		return append([]string{head}, formatQuerySegment(rest, 1)...)
+	}
+	return flatStatementLines(toks)
+}
+
+// layoutCopy lays out COPY (query) TO ... with the query as a derived table
+// under the COPY, and the TO / WITH options after its closing paren:
+//
+//	copy (
+//	  select ...
+//	    from ...
+//	) to stdout with (format csv);
+//
+// COPY table [(cols)] FROM/TO has no query and stays on one line.
+func layoutCopy(toks []Token) []string {
+	if len(toks) > 1 && toks[1].Text == "(" {
+		if lines, ok := subqueryRelationLines(toks[1:], 0); ok {
+			lines[0] = "copy " + lines[0]
+			return lines
+		}
 	}
 	return flatStatementLines(toks)
 }
